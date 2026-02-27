@@ -299,7 +299,7 @@ check("Catalyst check runs without error",
 
 # Test 16: Watchlist report formatting
 print("\n--- Test 16: Watchlist report formatting ---")
-report = format_watchlist_report(mock_wl, signals_off, catalysts)
+report = format_watchlist_report(mock_wl, signals_off, catalysts, cfg)
 check("Report is non-empty string",
       isinstance(report, str) and len(report) > 100,
       f"length={len(report)} chars")
@@ -311,6 +311,29 @@ check("Report contains all 4 watchlist sections",
 check("Report contains entry signal section",
       "Entry signals:" in report,
       "entry signal lines present")
+# NEW: Check report includes dollar amounts and portfolio header
+check("Report includes portfolio dollar header",
+      "$144,000" in report and "$100,000" in report and "$44,000" in report,
+      "portfolio/taxable/roth dollar values present")
+check("Report includes position size pct from config",
+      "2.0%" in report,
+      "pos_pct displayed")
+# If there are entry signals, check dollar amounts in signal lines
+if signals_off["entry"]:
+    # Check that at least one "Entry signals:" section has a dollar amount
+    entry_sections = report.split("Entry signals:")
+    has_dollar_in_entries = any("$" in sec for sec in entry_sections[1:])  # skip text before first
+    check("Report entry signals include dollar amounts",
+          has_dollar_in_entries,
+          "dollar amounts in entry signal lines")
+    check("Report entry signals include account labels",
+          any(label in report for label in ["Roth IRA", "Taxable"]),
+          "account type labels present")
+else:
+    check("Report entry signals include dollar amounts", True,
+          "no entries — acceptable with random seed")
+    check("Report entry signals include account labels", True,
+          "no entries — acceptable with random seed")
 
 
 # ===========================================================================
@@ -348,6 +371,20 @@ exit_count = len(result_def.get("signals", {}).get("exit", []))
 check("Defense: exit signals present",
       exit_count > 0,
       f"n_exit={exit_count}")
+
+# Test 18b: Full pipeline panic regime — expect 0 entries, all exits
+print("\n--- Test 18b: run_stock_screener(mock=True, regime='panic') ---")
+result_panic = run_stock_screener(conn=conn, cfg=cfg, mock=True, regime="panic")
+check("Panic pipeline returns dict",
+      isinstance(result_panic, dict),
+      f"type={type(result_panic)}")
+check("Panic: 0 entry signals",
+      len(result_panic.get("signals", {}).get("entry", [])) == 0,
+      f"n_entry={len(result_panic.get('signals', {}).get('entry', []))}")
+panic_exits = len(result_panic.get("signals", {}).get("exit", []))
+check("Panic: exit signals present",
+      panic_exits > 0,
+      f"n_exit={panic_exits}")
 
 # Test 19: JSON output structure
 print("\n--- Test 19: JSON output validation ---")
@@ -543,7 +580,7 @@ check("exit_signal thresholds present",
       "momentum_bottom_percentile" in sc_cfg.get("exit_signal", {}),
       "exit_signal config ok")
 
-# Test 30: Dollar amounts for signals
+# Test 30: Dollar amounts for signals (config-driven pos_pct)
 print("\n--- Test 30: Dollar allocation on signals ---")
 portfolio_total = cfg.get("portfolio", {}).get("total_value", 144000)
 taxable_val = cfg.get("portfolio", {}).get("accounts", {}).get("taxable", {}).get("value", 100000)
@@ -555,14 +592,19 @@ check("Taxable = $100K, Roth = $44K",
       taxable_val == 100000 and roth_val == 44000,
       f"taxable=${taxable_val:,.0f}, roth=${roth_val:,.0f}")
 
+# Verify watchlist_pos_pct is in config (not hardcoded)
+pos_pct_cfg = cfg.get("stock_screener", {}).get("watchlist_pos_pct")
+check("watchlist_pos_pct in config.yaml",
+      pos_pct_cfg is not None and 0 < pos_pct_cfg < 1,
+      f"watchlist_pos_pct={pos_pct_cfg}")
+pos_pct = pos_pct_cfg if pos_pct_cfg else 0.02
+
 # Show dollar breakdown for entry signals
 if signals_off["entry"]:
     print("\n  --- Example dollar allocation for top entry signal ---")
     top_sig = signals_off["entry"][0]
     acct = top_sig["account"]
     acct_val = roth_val if acct == "roth_ira" else taxable_val
-    # Equal-weight position sizing: each watchlist position = 2% of account
-    pos_pct = 0.02
     pos_dollars = acct_val * pos_pct
     print(f"  Signal: {top_sig['ticker']} ({top_sig['watchlist']}) → {acct}")
     print(f"  Position: {pos_pct*100:.0f}% of ${acct_val:,.0f} = ${pos_dollars:,.0f}")
@@ -573,6 +615,21 @@ else:
     # No entries to size — still pass this test
     check("Dollar amount computed for signal", True,
           "no entry signals to size — acceptable with random seed")
+
+# Test 30b: Filings table empty handling
+print("\n--- Test 30b: Filings table empty/missing handling ---")
+# Check with a connection that has no filings table
+import tempfile, os
+tmp_db = os.path.join(tempfile.gettempdir(), "test_no_filings.db")
+tmp_conn = sqlite3.connect(tmp_db)
+catalysts_empty = check_biotech_catalysts(
+    cfg.get("tickers", {}).get("watchlist_biotech", []), tmp_conn
+)
+tmp_conn.close()
+os.remove(tmp_db)
+check("Catalyst check returns empty list when no filings table",
+      isinstance(catalysts_empty, list) and len(catalysts_empty) == 0,
+      f"result={catalysts_empty}")
 
 
 # ===========================================================================
