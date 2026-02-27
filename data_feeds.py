@@ -26,6 +26,22 @@ import numpy as np
 import requests
 
 # ---------------------------------------------------------------------------
+# ENVIRONMENT VARIABLES CONTRACT
+# ---------------------------------------------------------------------------
+# The following secrets are read from os.environ (never hardcoded):
+#
+#   FRED_API_KEY         - Required for macro data (Phase 1). Free at fred.stlouisfed.org
+#   SEC_EDGAR_EMAIL      - Optional override for SEC User-Agent header (Phase 1)
+#   TELEGRAM_BOT_TOKEN   - Required for alert delivery (Phase 5)
+#   TELEGRAM_CHAT_ID     - Required for alert delivery (Phase 5)
+#   GMAIL_USERNAME       - Required for email alerts (Phase 5)
+#   GMAIL_PASSWORD       - Gmail App Password for SMTP (Phase 5)
+#   GOOGLE_SHEETS_CREDENTIALS - Service account JSON for gspread (Phase 5)
+#
+# In GitHub Actions, these are stored as repository secrets.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # LOGGING SETUP
 # ---------------------------------------------------------------------------
 LOG_DIR = Path(__file__).parent
@@ -260,13 +276,17 @@ def fetch_prices(
 
     prices = pd.concat(all_frames, ignore_index=True)
 
-    # Normalize column names
+    # Normalize column names — handle yfinance version differences
+    # yfinance may return 'Adj Close', 'adj close', 'Adj_Close', etc.
     col_map = {}
     for c in prices.columns:
         cl = str(c).lower().strip().replace(" ", "_")
-        if cl == "date" or cl == "datetime":
+        if cl in ("date", "datetime"):
             col_map[c] = "date"
-        elif cl == "adj_close" or cl == "adj close":
+        elif cl in ("adj_close", "adj close", "adjclose", "adjusted_close"):
+            col_map[c] = "adj_close"
+        elif cl == "price" and "adj_close" not in [col_map.get(x) for x in col_map]:
+            # Some yfinance versions use 'Price' as a column name
             col_map[c] = "adj_close"
         else:
             col_map[c] = cl
@@ -356,6 +376,105 @@ def fetch_macro_data(
     logger.info("Fetched %d macro observations across %d series",
                 len(df), df["series_id"].nunique())
     return df
+
+
+# ===========================================================================
+# 2B. ETF TOP HOLDINGS LOOKUP
+# ===========================================================================
+def get_etf_top_holdings(
+    etf_ticker: str,
+    n: int = 20,
+) -> List[str]:
+    """
+    Retrieve the top N holdings of an ETF by weight using yfinance.
+
+    Falls back to an empty list if the ETF has no holdings data
+    (e.g., delisted, non-US, or yfinance data gap).
+
+    Parameters
+    ----------
+    etf_ticker : str   ETF ticker symbol (e.g., 'XLK').
+    n : int            Number of top holdings to return (default: 20).
+
+    Returns
+    -------
+    List of ticker strings for the top holdings, ordered by weight.
+    """
+    import yfinance as yf
+
+    try:
+        etf = yf.Ticker(etf_ticker)
+
+        # yfinance exposes holdings via .funds_data.top_holdings or
+        # the older .info['holdings'] path. Try the modern API first.
+        try:
+            holdings_df = etf.funds_data.top_holdings
+            if holdings_df is not None and not holdings_df.empty:
+                # holdings_df index is ticker symbols, sorted by weight desc
+                tickers = holdings_df.index.tolist()[:n]
+                logger.info(
+                    "ETF %s: retrieved %d/%d top holdings via funds_data",
+                    etf_ticker, len(tickers), n,
+                )
+                return [str(t).upper() for t in tickers]
+        except (AttributeError, Exception):
+            pass
+
+        # Fallback: some yfinance versions expose holdings in .info
+        info = etf.info or {}
+        holdings = info.get("holdings", [])
+        if holdings:
+            tickers = [h.get("symbol", "") for h in holdings[:n] if h.get("symbol")]
+            if tickers:
+                logger.info(
+                    "ETF %s: retrieved %d/%d top holdings via info",
+                    etf_ticker, len(tickers), n,
+                )
+                return [t.upper() for t in tickers]
+
+        logger.warning("ETF %s: no holdings data available in yfinance", etf_ticker)
+        return []
+
+    except Exception as e:
+        logger.error("Failed to get holdings for ETF %s: %s", etf_ticker, e)
+        return []
+
+
+def get_sector_etf_top_holdings(
+    cfg: dict,
+    n_per_etf: int = None,
+) -> Dict[str, List[str]]:
+    """
+    For each sector ETF in config, retrieve the top N holdings.
+
+    Parameters
+    ----------
+    cfg : dict         Master config.
+    n_per_etf : int    Holdings per ETF (default: from config sec_edgar.top_holdings_per_etf).
+
+    Returns
+    -------
+    Dict mapping ETF ticker → list of holding tickers.
+    Example: {'XLK': ['AAPL', 'MSFT', 'NVDA', ...], ...}
+    """
+    if n_per_etf is None:
+        n_per_etf = cfg["sec_edgar"].get("top_holdings_per_etf", 5)
+
+    sector_etfs = cfg["tickers"]["sector_etfs"]
+    result = {}
+
+    for etf in sector_etfs:
+        holdings = get_etf_top_holdings(etf, n=n_per_etf)
+        result[etf] = holdings
+        if not holdings:
+            logger.warning("No holdings resolved for %s — filings will be skipped", etf)
+
+    total = sum(len(v) for v in result.values())
+    logger.info(
+        "Resolved %d total holdings across %d sector ETFs",
+        total, len(sector_etfs),
+    )
+    return result
 
 
 # ===========================================================================
@@ -508,16 +627,27 @@ def fetch_all_filings(
     """
     Fetch filings for the top holdings of each sector ETF
     plus all watchlist stocks.
+
+    If no tickers are provided, dynamically resolves top holdings
+    per sector ETF via yfinance, then adds all watchlist tickers.
     """
     if tickers is None:
-        # Combine watchlist tickers for now; ETF top holdings
-        # will be dynamically resolved in Phase 3B
         tickers = []
+
+        # Dynamically resolve top holdings for each sector ETF
+        try:
+            holdings_map = get_sector_etf_top_holdings(cfg)
+            for etf, holding_tickers in holdings_map.items():
+                tickers.extend(holding_tickers)
+        except Exception as e:
+            logger.error("Failed to resolve ETF top holdings: %s", e)
+
+        # Add watchlist tickers
         for key in ["watchlist_biotech", "watchlist_ai_software",
                      "watchlist_defense", "watchlist_green_materials"]:
             tickers.extend(cfg["tickers"].get(key, []))
 
-    # Deduplicate
+    # Deduplicate while preserving order
     tickers = list(dict.fromkeys(tickers))
 
     all_filings = []
