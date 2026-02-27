@@ -162,7 +162,9 @@ def compute_wedge_volume_percentile(
         if pd.isna(current_val):
             continue
         # Percentile rank: fraction of historical values that are <= current
-        pct = (window < current_val).sum() / len(window) * 100.0
+        # Uses <= (not <) for correct percentile-of-score behavior,
+        # consistent with scipy.stats.percentileofscore(kind='weak')
+        pct = (window <= current_val).sum() / len(window) * 100.0
         percentiles.iloc[i] = pct
 
     return percentiles
