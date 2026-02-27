@@ -190,7 +190,7 @@ fred:
 # SEC EDGAR SETTINGS
 # --------------------------------------------------------------------------
 sec_edgar:
-  user_agent: "QuantSystemBuilder/1.0 (gabrielper99018@gmail.com)"
+  user_agent: "QuantSystemBuilder/1.0 (gabop98@gmail.com)"
   rate_limit_sleep: 0.15        # seconds between API calls (10 req/s limit)
   filing_types:
     - "10-K"
