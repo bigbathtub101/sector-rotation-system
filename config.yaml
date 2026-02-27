@@ -346,6 +346,7 @@ probabilistic_triggers:
 stock_screener:
   top_holdings_count: 20            # Pull top N holdings from each overweight ETF
   min_price_history_days: 252       # Minimum trading days needed for scoring
+  watchlist_pos_pct: 0.02           # Each watchlist position = 2% of assigned account
   scoring_weights:
     momentum: 0.30                  # 12-1 month momentum rank
     quality: 0.25                   # ROE + gross margin + OCF yield
