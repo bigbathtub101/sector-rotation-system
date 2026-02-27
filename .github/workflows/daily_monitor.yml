@@ -1,0 +1,168 @@
+# ============================================================================
+# Sector Rotation System — Daily Monitor
+# ============================================================================
+# Runs monitor.py every trading day at 4:30 PM ET (20:30 UTC).
+# On any alert: sends email via Gmail SMTP, Telegram message, and
+# writes daily allocation row to Google Sheets.
+# Full daily report stored as a GitHub Actions artifact (90-day retention).
+#
+# Required GitHub Actions Secrets:
+#   FRED_API_KEY                - FRED API key (free at fred.stlouisfed.org)
+#   GMAIL_USERNAME              - Gmail address (e.g. you@gmail.com)
+#   GMAIL_PASSWORD              - Gmail App Password (NOT your Google password)
+#   TELEGRAM_BOT_TOKEN          - Telegram bot token from @BotFather
+#   TELEGRAM_CHAT_ID            - Your Telegram chat ID
+#   GOOGLE_SHEETS_CREDENTIALS   - Service account JSON (single-line)
+# ============================================================================
+
+name: Daily Sector Rotation Monitor
+
+on:
+  schedule:
+    # 4:30 PM ET = 20:30 UTC (EST) / 20:30 UTC year-round (close enough for daily)
+    - cron: "30 20 * * 1-5"
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10       # Hard cap; typical run is 2–4 minutes
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Checkout repository
+      # ------------------------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 2. Set up Python
+      # ------------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ------------------------------------------------------------------
+      # 3. Install dependencies
+      # ------------------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ------------------------------------------------------------------
+      # 4. Skip on US market holidays (basic check)
+      # ------------------------------------------------------------------
+      - name: Check if market is open
+        id: market_check
+        run: |
+          python -c "
+          import datetime as dt
+          today = dt.date.today()
+          # US federal holidays that always close the market
+          # (simplified — does not cover early closes)
+          FIXED_HOLIDAYS = {
+              (1, 1),   # New Year's Day
+              (7, 4),   # Independence Day
+              (12, 25), # Christmas
+          }
+          # Floating holidays approximated by month + weekday logic
+          month, day, weekday = today.month, today.day, today.weekday()
+          is_holiday = False
+          if (month, day) in FIXED_HOLIDAYS:
+              is_holiday = True
+          # MLK Day: 3rd Monday of January
+          elif month == 1 and weekday == 0 and 15 <= day <= 21:
+              is_holiday = True
+          # Presidents Day: 3rd Monday of February
+          elif month == 2 and weekday == 0 and 15 <= day <= 21:
+              is_holiday = True
+          # Memorial Day: last Monday of May
+          elif month == 5 and weekday == 0 and day >= 25:
+              is_holiday = True
+          # Labor Day: 1st Monday of September
+          elif month == 9 and weekday == 0 and day <= 7:
+              is_holiday = True
+          # Thanksgiving: 4th Thursday of November
+          elif month == 11 and weekday == 3 and 22 <= day <= 28:
+              is_holiday = True
+          if is_holiday:
+              print('skip=true')
+          else:
+              print('skip=false')
+          " >> $GITHUB_OUTPUT
+
+      # ------------------------------------------------------------------
+      # 5. Run the daily monitor
+      # ------------------------------------------------------------------
+      - name: Run monitor.py
+        if: steps.market_check.outputs.skip != 'true'
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
+        run: |
+          python monitor.py --run-daily 2>&1 | tee daily_report.txt
+          echo "MONITOR_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      # ------------------------------------------------------------------
+      # 6. Upload daily report as artifact (90-day retention, free)
+      # ------------------------------------------------------------------
+      - name: Upload daily report
+        if: steps.market_check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-report-${{ github.run_id }}
+          path: |
+            daily_report.txt
+            rotation_system.db
+          retention-days: 90
+
+      # ------------------------------------------------------------------
+      # 7. Send failure notification via Telegram on error
+      # ------------------------------------------------------------------
+      - name: Notify on failure
+        if: failure() && steps.market_check.outputs.skip != 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python -c "
+          import os, urllib.request, urllib.parse
+          token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+          chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+          if token and chat_id:
+              msg = '⚠️ Sector Rotation Monitor FAILED\nCheck: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+              data = urllib.parse.urlencode({'chat_id': chat_id, 'text': msg}).encode()
+              req = urllib.request.Request(f'https://api.telegram.org/bot{token}/sendMessage', data=data)
+              urllib.request.urlopen(req, timeout=10)
+          "
+
+      # ------------------------------------------------------------------
+      # 8. Send failure notification via email on error
+      # ------------------------------------------------------------------
+      - name: Email on failure
+        if: failure() && steps.market_check.outputs.skip != 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_PASSWORD }}
+          subject: "⚠️ Sector Rotation Monitor FAILED — ${{ github.run_id }}"
+          body: |
+            The daily sector rotation monitor run failed.
+            
+            Check the run at:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: ${{ secrets.GMAIL_USERNAME }}
+          from: ${{ secrets.GMAIL_USERNAME }}
