@@ -82,24 +82,24 @@ def check(name: str, condition: bool, detail: str = ""):
     if condition:
         passed += 1
         if VERBOSE:
-            print(f"  \u2713 {name}")
+            print(f"  ✓ {name}")
     else:
         failed += 1
-        msg = f"  \u2717 {name}"
+        msg = f"  ✗ {name}"
         if detail:
-            msg += f"  \u2192  {detail}"
+            msg += f"  →  {detail}"
         print(msg)
         errors.append(name)
 
 
 def section(title: str):
-    print(f"\n{'\u2500' * 60}")
+    print(f"\n{'─' * 60}")
     print(f"  {title}")
-    print(f"{'\u2500' * 60}")
+    print(f"{'─' * 60}")
 
 
 # ===========================================================================
-# FIXTURES \u2014 synthetic DB for isolated testing
+# FIXTURES — synthetic DB for isolated testing
 # ===========================================================================
 
 SAMPLE_10K_HTML = """
@@ -358,7 +358,7 @@ def test_token_truncation():
 
 
 def test_preprocess_pipeline():
-    section("4. Preprocessing Pipeline (strip \u2192 MD&A \u2192 truncate)")
+    section("4. Preprocessing Pipeline (strip → MD&A → truncate)")
 
     # 10-K with MD&A
     text, mda_found = preprocess_filing(SAMPLE_10K_HTML, "10-K", 512)
@@ -538,30 +538,30 @@ def test_vix_percentile():
 
     # Empty series
     pct_empty = compute_vix_percentile(pd.Series(dtype=float))
-    check("vix_percentile empty \u2192 NaN", math.isnan(pct_empty))
+    check("vix_percentile empty → NaN", math.isnan(pct_empty))
 
     # tag_vix_regime
-    check("VIX 15 \u2192 low_vol", tag_vix_regime(15.0, vix_series) == "low_vol")
-    check("VIX 25 \u2192 elevated", tag_vix_regime(25.0, vix_series) == "elevated")
-    check("VIX 35 \u2192 high_vol", tag_vix_regime(35.0, vix_series) == "high_vol")
-    check("VIX NaN \u2192 unknown",
+    check("VIX 15 → low_vol", tag_vix_regime(15.0, vix_series) == "low_vol")
+    check("VIX 25 → elevated", tag_vix_regime(25.0, vix_series) == "elevated")
+    check("VIX 35 → high_vol", tag_vix_regime(35.0, vix_series) == "high_vol")
+    check("VIX NaN → unknown",
           tag_vix_regime(float("nan"), vix_series) == "unknown")
 
     # check_drift_risk
-    check("drift_risk: 80 >= 75 \u2192 True", check_drift_risk(80.0, 75.0) is True)
-    check("drift_risk: 50 < 75 \u2192 False", check_drift_risk(50.0, 75.0) is False)
-    check("drift_risk: NaN \u2192 False",
+    check("drift_risk: 80 >= 75 → True", check_drift_risk(80.0, 75.0) is True)
+    check("drift_risk: 50 < 75 → False", check_drift_risk(50.0, 75.0) is False)
+    check("drift_risk: NaN → False",
           check_drift_risk(float("nan"), 75.0) is False)
 
 
 def test_confidence_flags():
     section("11. Confidence Flags")
 
-    check("HIGH: conf\u22650.7, mda, n\u22653",
+    check("HIGH: conf≥0.7, mda, n≥3",
           compute_confidence_flag(0.85, 3, True) == "HIGH")
-    check("MEDIUM: conf\u22650.5",
+    check("MEDIUM: conf≥0.5",
           compute_confidence_flag(0.6, 1, False) == "MEDIUM")
-    check("MEDIUM: mda + n\u22651",
+    check("MEDIUM: mda + n≥1",
           compute_confidence_flag(0.3, 1, True) == "MEDIUM")
     check("LOW: conf<0.5, no mda",
           compute_confidence_flag(0.3, 0, False) == "LOW")
@@ -685,7 +685,7 @@ def test_regime_weight_logic():
         score_all_filings(conn, scorer, cfg)
         signals_df = compute_sector_signals(conn, cfg)
 
-        # Check weight \u2014 note: drift_risk may also zero out the weight
+        # Check weight — note: drift_risk may also zero out the weight
         xlk = signals_df[signals_df["sector_etf"] == "XLK"]
         if len(xlk) == 1:
             actual_weight = xlk.iloc[0]["regime_weight"]
@@ -786,7 +786,7 @@ def test_rolling_trend():
 
     # Add filings at different dates to create a trend
     cur = conn.cursor()
-    # Old filing (70 days ago) \u2014 negative
+    # Old filing (70 days ago) — negative
     old_date = (dt.date.today() - dt.timedelta(days=70)).isoformat()
     neg_html = ("<html><body><p>Significant losses, declining revenue, "
                 "adverse conditions, impairment charges, and failure "
@@ -797,7 +797,7 @@ def test_rolling_trend():
          "0002-00", "doc.htm", "http://sec.gov", neg_html, "now"),
     )
 
-    # Recent filing (10 days ago) \u2014 positive
+    # Recent filing (10 days ago) — positive
     recent_date = (dt.date.today() - dt.timedelta(days=10)).isoformat()
     pos_html = ("<html><body><p>Record growth, exceeding expectations, "
                 "improved profitability, strong momentum, and "
@@ -865,7 +865,7 @@ def test_live_db_integration():
 
     db_path = Path(__file__).parent / "rotation_system.db"
     if not db_path.exists():
-        check("live DB exists (SKIP \u2014 not found)", True)
+        check("live DB exists (SKIP — not found)", True)
         return
 
     conn = get_db(db_path)
@@ -977,22 +977,152 @@ def test_edge_cases():
     check("all-numbers filing: valid result",
           -1 <= result_nums["raw_score"] <= 1)
 
-    # Unicode / special chars
+    # Unicode / special chars (em-dash, euro sign)
     unicode_text = ("<html><body><p>Revenue grew 15% \u2014 exceeding "
-                    "analysts' expectations. The company's \u20ac500M "
+                    "analysts\u2019 expectations. The company\u2019s \u20ac500M "
                     "investment achieved strong returns.</p></body></html>")
     result_uni = score_single_filing(unicode_text, "8-K", scorer, 512)
     check("unicode filing: scored OK",
           result_uni["raw_score"] != 0 or result_uni["confidence"] >= 0)
+    check("unicode filing: tokens_used > 0",
+          result_uni["tokens_used"] > 0,
+          f"tokens={result_uni['tokens_used']}")
 
     # Massive text
     big_text = "<html><body>" + "<p>growth profit gain</p>" * 10000 + "</body></html>"
     result_big = score_single_filing(big_text, "10-K", scorer, 512)
     check("massive filing: scored without error",
           -1 <= result_big["raw_score"] <= 1)
-    check("massive filing: tokens_used <= ~512",
-          result_big["tokens_used"] <= 500,
-          f"tokens={result_big['tokens_used']}")
+    check("massive filing: tokens_used <= max_words",
+          result_big["tokens_used"] <= int(512 / 1.3) + 1,
+          f"tokens={result_big['tokens_used']}, max_words={int(512/1.3)}")
+
+
+def test_panic_regime_dedicated():
+    """Dedicated test: panic regime produces zero weighted output."""
+    section("23. Panic Regime — Dedicated Test")
+
+    cfg = get_test_config()
+    conn = create_test_db()
+
+    # Override regime to panic
+    conn.execute("DELETE FROM signals")
+    data = json.dumps({"dominant_regime": "panic"})
+    conn.execute(
+        "INSERT INTO signals VALUES (?, ?, ?, ?)",
+        (dt.date.today().isoformat(), "regime_state", data, "now"),
+    )
+    # Low VIX so drift_risk doesn't interfere
+    conn.execute("DELETE FROM prices WHERE ticker='^VIX'")
+    base = dt.date.today() - dt.timedelta(days=260)
+    for i in range(252):
+        d = (base + dt.timedelta(days=i)).isoformat()
+        conn.execute(
+            "INSERT INTO prices VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (d, "^VIX", 16, 17, 15, 16, 16, 1000000, 0, "now"),
+        )
+    conn.commit()
+
+    scorer = FinBERTScorer(mock=True)
+    scores_df = score_all_filings(conn, scorer, cfg)
+    check("panic: filings still scored", len(scores_df) == 7,
+          f"n={len(scores_df)}")
+    check("panic: scores are non-trivial",
+          scores_df["raw_score"].abs().sum() > 0)
+
+    signals_df = compute_sector_signals(conn, cfg)
+    check("panic: 11 sector signals", len(signals_df) == 11)
+    check("panic: all weighted_scores = 0",
+          (signals_df["weighted_score"] == 0.0).all())
+    check("panic: all regime_weights = 0",
+          (signals_df["regime_weight"] == 0.0).all())
+
+    # Verify regime was correctly read
+    regime = fetch_latest_regime(conn)
+    check("panic: regime reads as 'panic'", regime == "panic")
+
+    conn.close()
+
+
+def test_empty_db_no_filings():
+    """Edge case: DB exists but filings table is empty."""
+    section("24. Empty DB / No Filings")
+
+    conn = sqlite3.connect(":memory:")
+    cur = conn.cursor()
+
+    # Minimal tables with no data in filings
+    cur.execute("""
+        CREATE TABLE prices (
+            date TEXT, ticker TEXT, open REAL, high REAL, low REAL,
+            close REAL, adj_close REAL, volume INTEGER,
+            stale_price INTEGER DEFAULT 0, fetched_at TEXT,
+            PRIMARY KEY (date, ticker)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE filings (
+            cik TEXT, ticker TEXT, company_name TEXT, filing_type TEXT,
+            filing_date TEXT, accession_number TEXT, primary_document TEXT,
+            filing_url TEXT, raw_text TEXT, fetched_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE signals (
+            date TEXT, signal_type TEXT, signal_data TEXT, created_at TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS nlp_scores (
+            date TEXT NOT NULL, ticker TEXT NOT NULL,
+            filing_type TEXT NOT NULL, filing_date TEXT NOT NULL,
+            raw_score REAL, lm_positive INTEGER DEFAULT 0,
+            lm_negative INTEGER DEFAULT 0, lm_uncertainty INTEGER DEFAULT 0,
+            confidence REAL, confidence_flag TEXT,
+            vix_at_filing REAL, vix_regime TEXT,
+            md_a_found INTEGER DEFAULT 0, tokens_used INTEGER DEFAULT 0,
+            scored_at TEXT,
+            PRIMARY KEY (date, ticker, filing_type)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS nlp_sector_signals (
+            date TEXT NOT NULL, sector_etf TEXT NOT NULL,
+            sector_score REAL, sector_confidence REAL,
+            rolling_trend REAL, n_filings INTEGER,
+            regime_weight REAL, weighted_score REAL,
+            drift_risk INTEGER DEFAULT 0, vix_percentile REAL,
+            computed_at TEXT,
+            PRIMARY KEY (date, sector_etf)
+        )
+    """)
+    conn.commit()
+
+    cfg = get_test_config()
+    scorer = FinBERTScorer(mock=True)
+
+    # Score empty filings
+    scores_df = score_all_filings(conn, scorer, cfg)
+    check("empty DB: scores_df is empty", len(scores_df) == 0)
+    check("empty DB: scores_df has expected columns",
+          "raw_score" in scores_df.columns)
+
+    # Sector signals should still produce 11 rows (all zeroed)
+    signals_df = compute_sector_signals(conn, cfg)
+    check("empty DB: 11 sector signals", len(signals_df) == 11,
+          f"n={len(signals_df)}")
+    check("empty DB: all n_filings = 0",
+          (signals_df["n_filings"] == 0).all())
+    check("empty DB: all sector_scores = 0",
+          (signals_df["sector_score"] == 0.0).all())
+
+    # Report should handle gracefully
+    regime = fetch_latest_regime(conn)
+    report = generate_nlp_report(scores_df, signals_df, regime)
+    check("empty DB: report generates OK",
+          isinstance(report, str) and len(report) > 50)
+
+    conn.close()
 
 
 # ===========================================================================
@@ -1003,7 +1133,7 @@ def main():
     global passed, failed
 
     print("=" * 60)
-    print("  SMOKE TEST \u2014 Phase 4: NLP Sentiment Pipeline")
+    print("  SMOKE TEST — Phase 4: NLP Sentiment Pipeline")
     print(f"  Date: {dt.date.today().isoformat()}")
     print(f"  Mode: MOCK (no FinBERT download)")
     print("=" * 60)
@@ -1030,6 +1160,8 @@ def main():
     test_cli_flags()
     test_idempotency()
     test_edge_cases()
+    test_panic_regime_dedicated()
+    test_empty_db_no_filings()
 
     print(f"\n{'=' * 60}")
     print(f"  RESULTS: {passed} passed, {failed} failed "
@@ -1039,7 +1171,7 @@ def main():
     if failed > 0:
         print("\n  FAILED CHECKS:")
         for e in errors:
-            print(f"    \u2717 {e}")
+            print(f"    ✗ {e}")
         print()
 
     sys.exit(0 if failed == 0 else 1)
