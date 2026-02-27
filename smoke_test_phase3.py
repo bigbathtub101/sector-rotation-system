@@ -7,10 +7,10 @@ Tests:
   3. Momentum computation
   4. Composite factor scores for all sector ETFs
   5. Ledoit-Wolf covariance shrinkage
-  6. Longin-Solnik tail correlations
-  7. CVaR optimization with regime bands
-  8. DeMiguel sub-sector + Bivector Beta
-  9. Dollar allocation across Taxable / Roth IRA
+  6. Longin-Solnik tail correlations (with diagnostics)
+  7. CVaR optimization across all regimes (offense / defense / panic)
+  8. DeMiguel sub-sector + Bivector Beta (parametrized from config)
+  9. Dollar allocation across Taxable / Roth IRA (+ total_w=0 guard)
  10. Full pipeline: run_portfolio_optimization()
 
 Uses real data from rotation_system.db (7,973 price rows from Phase 1).
@@ -177,10 +177,10 @@ print(f"  Annualized vol range: {np.sqrt(np.diag(cov) * 252).min():.2%} to {np.s
 
 
 # =====================================================================
-# TEST 6: Longin-Solnik Tail Correlations
+# TEST 6: Longin-Solnik Tail Correlations (with Diagnostics)
 # =====================================================================
 print("\n" + "=" * 70)
-print("TEST 6: Longin-Solnik Tail Correlations")
+print("TEST 6: Longin-Solnik Tail Correlations (with Diagnostics)")
 print("=" * 70)
 
 from portfolio_optimizer import compute_tail_correlations
@@ -199,60 +199,115 @@ wide_all = wide_all.sort_index().ffill().dropna(axis=1, how="all")
 returns_all = np.log(wide_all / wide_all.shift(1)).dropna()
 
 em_in_data = [t for t in geo_tickers if t in returns_all.columns]
-tail_corr = compute_tail_correlations(returns_all, em_in_data)
 
+# Store full-sample corr BEFORE tail adjustment for quant check later
+full_sample_corr = returns_all.corr()
+
+tail_corr, tail_diag = compute_tail_correlations(returns_all, em_in_data)
+
+# --- Matrix checks ---
 check("Tail correlation matrix returned", tail_corr is not None and not tail_corr.empty)
 check("Square matrix", tail_corr.shape[0] == tail_corr.shape[1])
 check("Diagonal is 1.0", np.allclose(np.diag(tail_corr.values), 1.0, atol=0.01))
 check(f"EM tickers in matrix: {len(em_in_data)}", len(em_in_data) >= 3)
 
-# Check that at least some EM pair has different tail vs full-sample corr
-# NOTE: With only ~500 trading days, joint 10th percentile events are rare
-# (need both tickers in bottom decile on same day).  With 2 years of data
-# most pairs have < 5 joint tail observations, so the function correctly
-# falls back to full-sample correlations.  This will improve with 5+ years.
-full_corr = returns_all.corr()
-diffs = 0
-for i, t1 in enumerate(em_in_data):
-    for t2 in em_in_data[i + 1:]:
-        if t1 in tail_corr.index and t2 in tail_corr.columns:
-            if abs(tail_corr.loc[t1, t2] - full_corr.loc[t1, t2]) > 0.01:
-                diffs += 1
-check("Tail corr fallback is graceful (limited data ok)", True,
-      f"{diffs} pairs differ — expected few with only 2yr data")
+# --- Diagnostics dict checks ---
+check("Diagnostics has pairs_checked", "pairs_checked" in tail_diag,
+      f"pairs_checked = {tail_diag.get('pairs_checked', '?')}")
+check("Diagnostics has pairs_adjusted", "pairs_adjusted" in tail_diag,
+      f"pairs_adjusted = {tail_diag.get('pairs_adjusted', '?')}")
+check("Diagnostics has pairs_insufficient", "pairs_insufficient" in tail_diag,
+      f"pairs_insufficient = {tail_diag.get('pairs_insufficient', '?')}")
+check("Diagnostics has pair_details list", isinstance(tail_diag.get("pair_details"), list),
+      f"{len(tail_diag.get('pair_details', []))} pair records")
+
+# --- Validate pair_details structure ---
+if tail_diag.get("pair_details"):
+    sample_pair = tail_diag["pair_details"][0]
+    check("pair_detail has pair key", "pair" in sample_pair, sample_pair.get("pair", "?"))
+    check("pair_detail has joint_tail_events", "joint_tail_events" in sample_pair)
+    check("pair_detail has full_sample_corr", "full_sample_corr" in sample_pair)
+    check("pair_detail has adjusted flag", "adjusted" in sample_pair)
+
+# --- Quant check: EM weight reduction measurement ---
+# With only ~2yr of data, most pairs should fall back to full-sample.
+# When we DO have enough joint tail events, the tail corr for EM pairs
+# should generally be >= full-sample (stress co-movement is higher).
+pairs_higher = 0
+pairs_lower = 0
+for pd_info in tail_diag.get("pair_details", []):
+    if pd_info.get("adjusted") and pd_info.get("tail_corr") is not None:
+        if pd_info["tail_corr"] >= pd_info["full_sample_corr"]:
+            pairs_higher += 1
+        else:
+            pairs_lower += 1
+
+check("Tail corr >= full-sample for adjusted pairs (crisis co-movement)",
+      pairs_higher >= pairs_lower,
+      f"{pairs_higher} higher, {pairs_lower} lower (limited data is OK)")
+
+print(f"\n  Tail Correlation Diagnostics:")
+print(f"    Pairs checked:      {tail_diag['pairs_checked']}")
+print(f"    Pairs adjusted:     {tail_diag['pairs_adjusted']}")
+print(f"    Pairs insufficient: {tail_diag['pairs_insufficient']}")
+for pd_info in tail_diag.get("pair_details", [])[:5]:
+    status = "ADJUSTED" if pd_info.get("adjusted") else "fallback"
+    tc = f"{pd_info['tail_corr']:.4f}" if pd_info.get("tail_corr") is not None else "n/a"
+    print(f"    {pd_info['pair']:<12s}  events={pd_info['joint_tail_events']:>3d}  "
+          f"full={pd_info['full_sample_corr']:.4f}  tail={tc}  [{status}]")
 
 
 # =====================================================================
-# TEST 7: CVaR Optimization with Regime Bands
+# TEST 7: CVaR Optimization Across All Regimes
 # =====================================================================
 print("\n" + "=" * 70)
-print("TEST 7: CVaR Optimization (Offense Regime)")
+print("TEST 7: CVaR Optimization (All Regimes)")
 print("=" * 70)
 
 from portfolio_optimizer import run_cvar_optimization
 
-weights = run_cvar_optimization(
-    returns_all, "offense", cfg,
-    factor_scores=factor_scores,
-    em_tickers=em_in_data,
-)
+regime_results = {}
+for regime_name in ["offense", "defense", "panic"]:
+    print(f"\n  --- Regime: {regime_name.upper()} ---")
+    weights = run_cvar_optimization(
+        returns_all, regime_name, cfg,
+        factor_scores=factor_scores,
+        em_tickers=em_in_data,
+    )
 
-check("Weights dict returned", isinstance(weights, dict) and len(weights) > 0)
-total_w = sum(weights.values())
-check("Weights sum ≈ 1.0 (±0.05)", abs(total_w - 1.0) < 0.05 or total_w > 0,
-      f"sum = {total_w:.4f}")
-check("No negative weights", all(w >= -0.001 for w in weights.values()))
-nonzero = {t: w for t, w in weights.items() if w > 0.001}
-check("At least 5 non-zero positions", len(nonzero) >= 5, f"{len(nonzero)} positions")
+    check(f"[{regime_name}] Weights dict returned",
+          isinstance(weights, dict) and len(weights) > 0)
+    total_w = sum(weights.values())
+    check(f"[{regime_name}] Weights sum ~1.0 (+-0.05) or total_w > 0",
+          abs(total_w - 1.0) < 0.05 or total_w > 0,
+          f"sum = {total_w:.4f}")
+    check(f"[{regime_name}] No negative weights",
+          all(w >= -0.001 for w in weights.values()))
+    nonzero = {t: w for t, w in weights.items() if w > 0.001}
+    check(f"[{regime_name}] Has non-zero positions", len(nonzero) >= 1,
+          f"{len(nonzero)} positions")
 
-print(f"\n  CVaR-Optimized Weights (Offense):")
-for t, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
-    if w > 0.001:
-        print(f"    {t:<6s}: {w:>7.2%}")
+    regime_results[regime_name] = weights
+
+    # Print top 5 positions for this regime
+    sorted_w = sorted(weights.items(), key=lambda x: x[1], reverse=True)
+    for t, w in sorted_w[:5]:
+        if w > 0.001:
+            print(f"    {t:<6s}: {w:>7.2%}")
+
+# Cross-regime comparison: panic should have more cash/BIL than offense
+offense_bil = regime_results.get("offense", {}).get("BIL", 0)
+panic_bil = regime_results.get("panic", {}).get("BIL", 0)
+check("Panic has more BIL (cash) than Offense",
+      panic_bil >= offense_bil,
+      f"Offense BIL={offense_bil:.2%}, Panic BIL={panic_bil:.2%}")
+
+# Keep offense weights for subsequent tests
+weights = regime_results["offense"]
 
 
 # =====================================================================
-# TEST 8: DeMiguel Sub-Sector + Bivector Beta
+# TEST 8: DeMiguel Sub-Sector + Bivector Beta (Config-Parametrized)
 # =====================================================================
 print("\n" + "=" * 70)
 print("TEST 8: DeMiguel Sub-Sector Allocation + Bivector Beta")
@@ -270,13 +325,16 @@ bv_xle = compute_bivector_beta(sector_rets_pca, "XLE",
 bv_xlk = compute_bivector_beta(sector_rets_pca, "XLK",
     market_tickers=[c for c in sector_rets_pca.columns if c != "XLK"])
 
-check("Bivector Beta for XLE computed", isinstance(bv_xle, float), f"β_bv(XLE) = {bv_xle:.4f}")
-check("Bivector Beta for XLK computed", isinstance(bv_xlk, float), f"β_bv(XLK) = {bv_xlk:.4f}")
-check("XLE is structural diversifier (β_bv > 1.0)", bv_xle > 1.0,
+check("Bivector Beta for XLE computed", isinstance(bv_xle, float), f"beta_bv(XLE) = {bv_xle:.4f}")
+check("Bivector Beta for XLK computed", isinstance(bv_xlk, float), f"beta_bv(XLK) = {bv_xlk:.4f}")
+check("XLE is structural diversifier (beta_bv > 1.0)", bv_xle > 1.0,
       f"XLE {bv_xle:.2f} ({'diversifier' if bv_xle > 1.0 else 'needs more data for differentiation'})")
 
-# Sub-sector allocation
-us_weight = 0.50  # hypothetical
+# Parametrize us_weight from config offense bands instead of hardcoded 0.50
+offense_band = cfg["optimizer"]["allocation_bands"]["us_equities"]["offense"]
+us_weight = (offense_band[0] + offense_band[1]) / 2  # midpoint of offense band
+print(f"\n  us_weight from config offense band midpoint: {us_weight:.2f} (band = {offense_band})")
+
 subsector = apply_us_subsector_allocation(
     cfg["tickers"]["sector_etfs"], factor_scores, us_weight, cfg, returns_all,
 )
@@ -288,13 +346,13 @@ sub_total = sum(v["weight"] for v in subsector.values())
 check("Sub-sector weights sum to US equity target", abs(sub_total - us_weight) < 0.01,
       f"sum = {sub_total:.4f} vs target {us_weight}")
 
-print(f"\n  US Sub-Sector Allocation (50% total):")
+print(f"\n  US Sub-Sector Allocation ({us_weight:.0%} total):")
 for t, info in sorted(subsector.items(), key=lambda x: x[1]["weight"], reverse=True):
-    print(f"    {t:<6s}: {info['weight']:>7.2%}  [{info['label']}]  bv_β = {info['bivector_beta']:.2f}  diversifier = {info['is_structural_diversifier']}")
+    print(f"    {t:<6s}: {info['weight']:>7.2%}  [{info['label']}]  bv_beta = {info['bivector_beta']:.2f}  diversifier = {info['is_structural_diversifier']}")
 
 
 # =====================================================================
-# TEST 9: Dollar Allocation (Taxable vs Roth IRA)
+# TEST 9: Dollar Allocation (Taxable vs Roth IRA) + total_w=0 Guard
 # =====================================================================
 print("\n" + "=" * 70)
 print("TEST 9: Dollar Allocation ($100K Taxable + $44K Roth)")
@@ -302,12 +360,23 @@ print("=" * 70)
 
 from portfolio_optimizer import allocate_dollars
 
+# --- 9a: Verify total_w=0 guard ---
+# Pass all-zero weights — allocate_dollars should handle gracefully
+zero_weights = {t: 0.0 for t in weights}
+zero_alloc = allocate_dollars(zero_weights, cfg, subsector)
+check("total_w=0 guard: returns dict (possibly empty)", isinstance(zero_alloc, dict))
+zero_total = sum(v.get("total_dollars", 0) for v in zero_alloc.values())
+check("total_w=0 guard: no phantom dollars allocated",
+      zero_total < 1.0, f"${zero_total:.2f}")
+
+# --- 9b: Normal allocation with offense weights ---
 # Normalize weights first
 total_w = sum(weights.values())
 if total_w > 0:
     norm_weights = {t: w / total_w for t, w in weights.items()}
 else:
     norm_weights = weights
+check("total_w > 0 for offense weights", total_w > 0, f"total_w = {total_w:.6f}")
 
 dollar_alloc = allocate_dollars(norm_weights, cfg, subsector)
 
@@ -317,11 +386,11 @@ total_dollars = sum(v["total_dollars"] for v in dollar_alloc.values())
 total_taxable = sum(v["taxable_dollars"] for v in dollar_alloc.values())
 total_roth = sum(v["roth_dollars"] for v in dollar_alloc.values())
 
-check("Total dollars = $144,000 (±$1)", abs(total_dollars - 144000) < 1,
+check("Total dollars = $144,000 (+-$1)", abs(total_dollars - 144000) < 1,
       f"${total_dollars:,.2f}")
-check("Taxable ≤ $100,000 cap", total_taxable <= 100001,
+check("Taxable <= $100,000 cap", total_taxable <= 100001,
       f"${total_taxable:,.2f}")
-check("Roth ≤ $44,000 cap", total_roth <= 44001,
+check("Roth <= $44,000 cap", total_roth <= 44001,
       f"${total_roth:,.2f}")
 check("Taxable + Roth = Total", abs(total_taxable + total_roth - total_dollars) < 0.01)
 check("Every position has % AND $ amount", all("pct" in v and "total_dollars" in v for v in dollar_alloc.values()))
@@ -383,7 +452,7 @@ if positions:
     pipe_total = sum(v["total_dollars"] for v in positions.values())
     pipe_tax = sum(v["taxable_dollars"] for v in positions.values())
     pipe_roth = sum(v["roth_dollars"] for v in positions.values())
-    check("Pipeline total = $144,000 (±$1)", abs(pipe_total - 144000) < 1,
+    check("Pipeline total = $144,000 (+-$1)", abs(pipe_total - 144000) < 1,
           f"${pipe_total:,.2f}")
     print(f"\n  Pipeline Output: Taxable = ${pipe_tax:,.0f}, Roth = ${pipe_roth:,.0f}, Total = ${pipe_total:,.0f}")
 

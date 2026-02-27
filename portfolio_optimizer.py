@@ -47,8 +47,14 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
 
 def download_ff_factors(start_date: str = None) -> pd.DataFrame:
     """
-    Download Fama-French 5 factors + Momentum from Ken French's data library.
-    Returns a DataFrame with daily factor returns: Mkt-RF, SMB, HML, RMW, CMA, RF.
+    Download Fama-French 5 factors from Ken French's data library.
+    Returns a DataFrame with DAILY factor returns: Mkt-RF, SMB, HML, RMW, CMA, RF.
+
+    NOTE: We use the daily dataset ("F-F_Research_Data_5_Factors_2x3_daily")
+    rather than the monthly version because our factor loading regressions
+    run on daily excess returns.  The window_months parameter in
+    compute_factor_loadings() is converted to trading days (months * 21)
+    to match this daily frequency.
 
     Falls back to a simulated dataset if pandas_datareader fails
     (some environments block the connection).
@@ -274,7 +280,8 @@ def compute_tail_correlations(
     returns: pd.DataFrame,
     em_tickers: List[str],
     percentile: int = 10,
-) -> pd.DataFrame:
+    min_joint_events: int = 5,
+) -> Tuple[pd.DataFrame, dict]:
     """
     Longin-Solnik tail correlation adjustment for EM positions.
 
@@ -283,17 +290,37 @@ def compute_tail_correlations(
     These tail correlations capture crisis-period co-movement
     that full-sample correlations understate.
 
-    Returns a correlation matrix (full universe) with EM pairs
-    replaced by their tail-conditional estimates.
+    Parameters
+    ----------
+    returns : pd.DataFrame  Wide-format daily returns.
+    em_tickers : list       EM/geographic ETF tickers to adjust.
+    percentile : int        Joint tail threshold (default 10th).
+    min_joint_events : int  Minimum joint tail observations per pair
+                            (default 5).  Below this the pair falls
+                            back to full-sample correlation.
+
+    Returns
+    -------
+    Tuple of (correlation_matrix, diagnostics_dict).
+    diagnostics_dict has keys: pairs_checked, pairs_adjusted,
+    pairs_insufficient, pair_details (list of per-pair info).
     """
     full_corr = returns.corr()
     clean = returns.dropna()
+
+    diag = {
+        "pairs_checked": 0,
+        "pairs_adjusted": 0,
+        "pairs_insufficient": 0,
+        "pair_details": [],
+    }
 
     for i, t1 in enumerate(em_tickers):
         for t2 in em_tickers[i + 1:]:
             if t1 not in clean.columns or t2 not in clean.columns:
                 continue
 
+            diag["pairs_checked"] += 1
             r1 = clean[t1]
             r2 = clean[t2]
 
@@ -301,22 +328,49 @@ def compute_tail_correlations(
             thresh1 = np.percentile(r1, percentile)
             thresh2 = np.percentile(r2, percentile)
             mask = (r1 <= thresh1) & (r2 <= thresh2)
+            n_joint = int(mask.sum())
 
-            if mask.sum() < 5:
+            full_sample_corr = full_corr.loc[t1, t2]
+            pair_info = {
+                "pair": f"{t1}/{t2}",
+                "joint_tail_events": n_joint,
+                "full_sample_corr": round(float(full_sample_corr), 4),
+                "tail_corr": None,
+                "adjusted": False,
+            }
+
+            if n_joint < min_joint_events:
                 # Not enough tail observations — use full sample as floor
+                diag["pairs_insufficient"] += 1
+                logger.debug(
+                    "Tail corr %s/%s: only %d joint events (need >=%d) — keeping full-sample %.4f",
+                    t1, t2, n_joint, min_joint_events, full_sample_corr,
+                )
+                diag["pair_details"].append(pair_info)
                 continue
 
-            tail_corr = r1[mask].corr(r2[mask])
-            if np.isfinite(tail_corr):
+            tail_corr_val = r1[mask].corr(r2[mask])
+            pair_info["tail_corr"] = round(float(tail_corr_val), 4) if np.isfinite(tail_corr_val) else None
+
+            if np.isfinite(tail_corr_val):
                 # Tail correlations are typically higher — use them
-                full_corr.loc[t1, t2] = tail_corr
-                full_corr.loc[t2, t1] = tail_corr
+                full_corr.loc[t1, t2] = tail_corr_val
+                full_corr.loc[t2, t1] = tail_corr_val
+                diag["pairs_adjusted"] += 1
+                pair_info["adjusted"] = True
                 logger.info(
-                    "Tail correlation %s/%s: %.4f (full-sample: %.4f)",
-                    t1, t2, tail_corr, returns[[t1, t2]].corr().iloc[0, 1],
+                    "Tail correlation %s/%s: %.4f (full-sample: %.4f, %d joint events)",
+                    t1, t2, tail_corr_val, full_sample_corr, n_joint,
                 )
 
-    return full_corr
+            diag["pair_details"].append(pair_info)
+
+    logger.info(
+        "Tail correlation summary: %d pairs checked, %d adjusted, %d insufficient data (<%d events)",
+        diag["pairs_checked"], diag["pairs_adjusted"],
+        diag["pairs_insufficient"], min_joint_events,
+    )
+    return full_corr, diag
 
 
 def run_cvar_optimization(
@@ -353,8 +407,10 @@ def run_cvar_optimization(
     cov_df = pd.DataFrame(cov_matrix, index=returns.columns, columns=returns.columns)
 
     # Apply tail correlations for EM pairs
-    tail_corr = compute_tail_correlations(returns, em_tickers,
-                                          percentile=cfg["optimizer"]["tail_correlation_percentile"])
+    tail_corr, tail_diag = compute_tail_correlations(
+        returns, em_tickers,
+        percentile=cfg["optimizer"]["tail_correlation_percentile"],
+    )
 
     # Reconstruct covariance from tail correlations + shrunk variances
     stds = np.sqrt(np.diag(cov_matrix))
@@ -480,6 +536,7 @@ def compute_bivector_beta(
     returns: pd.DataFrame,
     sector_ticker: str,
     market_tickers: List[str] = None,
+    market_proxy: str = "SPY",
     min_obs: int = 30,
 ) -> float:
     """
@@ -494,6 +551,10 @@ def compute_bivector_beta(
     returns : pd.DataFrame  Wide-format returns (date × ticker).
     sector_ticker : str     The sector to evaluate.
     market_tickers : list   Tickers for PCA (default: all other columns).
+    market_proxy : str      If present in returns, include as a market
+                            anchor in PCA (default: "SPY").  The report
+                            specifies PC1 of "the market" — SPY ensures
+                            PC1 aligns with the broad equity factor.
     min_obs : int           Minimum observations required for PCA.
 
     Returns
@@ -505,6 +566,13 @@ def compute_bivector_beta(
 
     if market_tickers is None:
         market_tickers = [c for c in returns.columns if c != sector_ticker]
+
+    # If SPY (or configured market_proxy) is in the returns but not in
+    # market_tickers, add it so PC1 aligns with the broad market factor.
+    if market_proxy and market_proxy in returns.columns and market_proxy != sector_ticker:
+        if market_proxy not in market_tickers:
+            market_tickers = market_tickers + [market_proxy]
+            logger.debug("Bivector Beta: added %s as market anchor for PCA", market_proxy)
 
     # Use pairwise-available data: first select columns, then drop rows
     # where the sector or any market ticker is NaN.  If mixed-length
@@ -546,7 +614,7 @@ def compute_bivector_beta(
 
     # Bivector Beta: inverse of |correlation| — higher = more orthogonal
     bivector_beta = 1.0 / max(abs(corr), 0.01)
-    logger.info("Bivector Beta %s: corr=%.4f, beta_bv=%.4f (%d obs, %d market tickers)",
+    logger.info("Bivector Beta %s: corr=%.4f, β_bv=%.4f (%d obs, %d market tickers)",
                 sector_ticker, corr, bivector_beta, clean.shape[0], len(candidate_cols))
     return round(bivector_beta, 4)
 
@@ -933,6 +1001,11 @@ def run_portfolio_optimization(
     total_w = sum(weights.values())
     if total_w > 0:
         weights = {t: w / total_w for t, w in weights.items()}
+    else:
+        logger.error("All weights are zero after sub-sector allocation — cannot allocate dollars.")
+        if close_conn:
+            conn.close()
+        return {}
 
     # --- Step 6: Dollar allocation ---
     logger.info("Computing dollar allocation...")
@@ -999,12 +1072,48 @@ def run_portfolio_optimization(
 # ===========================================================================
 if __name__ == "__main__":
     import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Phase 3: Factor Scoring & CVaR Portfolio Optimizer")
+    parser.add_argument("--mock", action="store_true",
+                        help="Use synthetic data if DB is empty or missing (for initial setup/CI)")
+    parser.add_argument("--regime", choices=["offense", "defense", "panic"],
+                        default=None, help="Override regime (default: read from DB)")
+    args = parser.parse_args()
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
-    result = run_portfolio_optimization()
+
+    if args.mock:
+        logger.info("--mock mode: generating synthetic price data")
+        # Generate synthetic DB if empty
+        conn = sqlite3.connect(str(DB_PATH))
+        row_count = conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
+        if row_count == 0:
+            logger.info("DB empty — seeding synthetic sector prices for smoke testing")
+            cfg = load_config()
+            dates = pd.bdate_range(end=dt.date.today(), periods=600)
+            np.random.seed(42)
+            mock_rows = []
+            all_mock_tickers = (cfg["tickers"]["sector_etfs"] +
+                                cfg["tickers"]["geographic_etfs"] + ["BIL", "SPY"])
+            for ticker in all_mock_tickers:
+                base = np.random.uniform(30, 200)
+                prices = base * np.exp(np.cumsum(np.random.normal(0.0003, 0.015, len(dates))))
+                for d, p in zip(dates, prices):
+                    mock_rows.append((d.strftime("%Y-%m-%d"), ticker, p, p, p * 0.99, p, p, int(np.random.uniform(1e6, 5e6))))
+            conn.executemany(
+                "INSERT OR IGNORE INTO prices (date, ticker, open, high, low, close, adj_close, volume) VALUES (?,?,?,?,?,?,?,?)",
+                mock_rows,
+            )
+            conn.commit()
+            logger.info("Seeded %d synthetic price rows", len(mock_rows))
+        conn.close()
+
+    result = run_portfolio_optimization(regime=args.regime)
     if result:
         print("\n" + "=" * 70)
         print("PORTFOLIO ALLOCATION — %s REGIME" % result.get("regime", "?").upper())
