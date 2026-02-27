@@ -21,6 +21,19 @@ portfolio:
       tax_treatment: "All growth permanently tax-free"
 
 # --------------------------------------------------------------------------
+# CURRENT HOLDINGS (update after every trade)
+# --------------------------------------------------------------------------
+current_holdings:
+  taxable:
+    SGOV:
+      shares: 976.121
+      current_value: 98236.82
+  roth_ira:
+    JAAA:
+      shares: 911.651
+      current_value: 46047.30
+
+# --------------------------------------------------------------------------
 # TAX-LOCATION RULES
 # --------------------------------------------------------------------------
 tax_location:
@@ -177,7 +190,7 @@ fred:
 # SEC EDGAR SETTINGS
 # --------------------------------------------------------------------------
 sec_edgar:
-  user_agent: "QuantSystemBuilder/1.0 (your_email@domain.com)"
+  user_agent: "QuantSystemBuilder/1.0 (gabrielper99018@gmail.com)"
   rate_limit_sleep: 0.15        # seconds between API calls (10 req/s limit)
   filing_types:
     - "10-K"
@@ -314,7 +327,7 @@ alerts:
     enabled: true
   google_sheets:
     # Service account JSON from env: GOOGLE_SHEETS_CREDENTIALS
-    spreadsheet_name: "Sector Rotation Daily Log"
+    spreadsheet_name: "Sector Rotation Log"
     enabled: true
 
 # --------------------------------------------------------------------------
