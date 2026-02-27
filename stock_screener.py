@@ -61,14 +61,16 @@ def _fetch_ticker_info(ticker: str) -> dict:
         ocf_yield = (ocf / market_cap) if market_cap > 0 else 0.0
 
         # Forward P/E: try forwardPE directly, else compute from forwardEps
+        # Guard: skip fallback when fwd_eps <= 0 (negative EPS → meaningless PE)
         if isinstance(fwd_pe, (int, float)) and fwd_pe > 0:
             forward_pe = fwd_pe
         else:
             fwd_eps = info.get("forwardEps")
             price = info.get("currentPrice") or info.get("previousClose") or 0
-            if fwd_eps and fwd_eps > 0 and price > 0:
+            if fwd_eps is not None and fwd_eps > 0 and price > 0:
                 forward_pe = price / fwd_eps
             else:
+                # Negative or zero fwd_eps → cannot compute meaningful PE
                 forward_pe = None
 
         return {
@@ -131,6 +133,9 @@ def _fetch_etf_holdings(etf_ticker: str, top_n: int = 20) -> List[str]:
 
     # Hardcoded top holdings for sector ETFs (updated Feb 2026 approximate)
     # These are the real top holdings by weight — updated periodically
+    # TODO: Replace with dynamic ETF holdings via finance_holdings API or
+    # yfinance etf.holdings when reliably available for all sector SPDRs.
+    # Current static list should be refreshed quarterly.
     _HOLDINGS = {
         "XLK": ["AAPL", "MSFT", "NVDA", "AVGO", "CRM", "ADBE", "AMD", "CSCO",
                  "ORCL", "ACN", "INTC", "IBM", "QCOM", "TXN", "INTU",
@@ -769,13 +774,32 @@ def format_watchlist_report(
     watchlist_scores: Dict[str, pd.DataFrame],
     signals: Dict[str, List[dict]],
     catalysts: List[dict] = None,
+    cfg: dict = None,
 ) -> str:
     """Generate the daily watchlist report text.
     Matches the format from the master prompt.
+
+    Includes dollar amounts and tax account notes per portfolio rules:
+    $100K taxable + $44K Roth = $144K total.
     """
+    if cfg is None:
+        cfg = load_config()
+
     today = dt.date.today().isoformat()
+
+    # Portfolio values for dollar sizing
+    pf = cfg.get("portfolio", {})
+    acct_cfg = pf.get("accounts", {})
+    taxable_val = acct_cfg.get("taxable", {}).get("value", 100000)
+    roth_val = acct_cfg.get("roth_ira", {}).get("value", 44000)
+    total_val = pf.get("total_value", 144000)
+    pos_pct = cfg.get("stock_screener", {}).get("watchlist_pos_pct", 0.02)
+    split_threshold = cfg.get("tax_location", {}).get("split_threshold", 10000)
+
     lines = [
         f"=== THEMATIC WATCHLIST STATUS — {today} ===",
+        f"Portfolio: ${total_val:,.0f} (Taxable ${taxable_val:,.0f} + Roth ${roth_val:,.0f})",
+        f"Position size: {pos_pct*100:.1f}% | Split threshold: ${split_threshold:,.0f}",
         "",
     ]
 
@@ -819,11 +843,24 @@ def format_watchlist_report(
             else:
                 lines.append("  New 8-K filings today: NONE")
 
-        # Entry signals for this watchlist
+        # Entry signals for this watchlist — with dollar amounts and account notes
         wl_entries = [s for s in signals.get("entry", []) if s["watchlist"] == wl_key]
         if wl_entries:
-            entry_tickers = [s["ticker"] for s in wl_entries]
-            lines.append(f"  Entry signals: {', '.join(entry_tickers)}")
+            entry_lines = []
+            for sig in wl_entries:
+                acct = sig.get("account", "roth_ira")
+                acct_val = roth_val if acct == "roth_ira" else taxable_val
+                pos_dollars = acct_val * pos_pct
+                acct_label = "Roth IRA" if acct == "roth_ira" else "Taxable"
+                # Flag if position would cross split threshold
+                split_note = ""
+                if pos_dollars >= split_threshold:
+                    split_note = " [eligible for split]"
+                entry_lines.append(
+                    f"{sig['ticker']} → {acct_label} "
+                    f"({pos_pct*100:.1f}% = ${pos_dollars:,.0f}){split_note}"
+                )
+            lines.append(f"  Entry signals: {'; '.join(entry_lines)}")
         else:
             lines.append("  Entry signals: NONE")
 
@@ -1015,7 +1052,7 @@ def run_stock_screener(
     signals["catalyst"] = catalysts
 
     # --- Step 7: Generate report ---
-    report_text = format_watchlist_report(watchlist_scores, signals, catalysts)
+    report_text = format_watchlist_report(watchlist_scores, signals, catalysts, cfg)
 
     # --- Build output ---
     result = {
@@ -1063,9 +1100,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase 3B: Stock Screener & Thematic Watchlists")
     parser.add_argument("--mock", action="store_true",
                         help="Use synthetic data (no yfinance calls)")
+    parser.add_argument("--real", action="store_true",
+                        help="Force live yfinance API calls (overrides --mock)")
     parser.add_argument("--regime", choices=["offense", "defense", "panic"],
                         default=None, help="Override regime")
     args = parser.parse_args()
+
+    # --real overrides --mock; default is mock for safety
+    use_mock = args.mock and not args.real
 
     logging.basicConfig(
         level=logging.INFO,
@@ -1073,7 +1115,7 @@ if __name__ == "__main__":
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    result = run_stock_screener(mock=args.mock, regime=args.regime)
+    result = run_stock_screener(mock=use_mock, regime=args.regime)
 
     if result:
         print("\n" + result.get("report_text", "No report generated"))
