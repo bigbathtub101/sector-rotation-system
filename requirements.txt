@@ -1,0 +1,36 @@
+# ============================================================================
+# Sector Rotation System — Python Dependencies
+# ============================================================================
+# Install: pip install -r requirements.txt
+# All packages are free / open-source. No proprietary dependencies.
+# ============================================================================
+
+# --- Core Data & Math ---
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+PyYAML>=6.0
+
+# --- Market Data ---
+yfinance>=0.2.28
+
+# --- Portfolio Optimization ---
+pyportfolioopt>=1.5.5
+
+# --- NLP / Sentiment ---
+transformers>=4.30.0
+torch>=2.0.0                    # CPU-only; Colab supplies GPU automatically
+
+# --- Web Requests (FRED, SEC EDGAR) ---
+requests>=2.28.0
+
+# --- Google Sheets Integration ---
+gspread>=5.10.0
+google-auth>=2.20.0
+
+# --- Dashboard ---
+streamlit>=1.28.0
+plotly>=5.15.0
+
+# --- Testing ---
+pytest>=7.3.0
