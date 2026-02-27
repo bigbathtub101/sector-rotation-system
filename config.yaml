@@ -9,14 +9,14 @@
 # PORTFOLIO CONTEXT
 # --------------------------------------------------------------------------
 portfolio:
-  total_value: 144000
+  total_value: 144284.12
   accounts:
     taxable:
-      value: 100000
+      value: 98236.82
       type: "Individual Brokerage"
       tax_treatment: "Capital gains taxed; long-term preferred"
     roth_ira:
-      value: 44000
+      value: 46047.30
       type: "Retirement"
       tax_treatment: "All growth permanently tax-free"
 
