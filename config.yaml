@@ -4,34 +4,24 @@
 # All thresholds, parameters, and lists are configurable here.
 # No magic numbers in the codebase — everything references this file.
 # ============================================================================
+# PROFILE: Aggressive Growth — 27yo, beat-the-market objective
+# UPDATED: 2026-02-28
+# ============================================================================
 
 # --------------------------------------------------------------------------
 # PORTFOLIO CONTEXT
 # --------------------------------------------------------------------------
 portfolio:
-  total_value: 144284.12
+  total_value: 144000
   accounts:
     taxable:
-      value: 98236.82
+      value: 100000
       type: "Individual Brokerage"
       tax_treatment: "Capital gains taxed; long-term preferred"
     roth_ira:
-      value: 46047.30
+      value: 44000
       type: "Retirement"
       tax_treatment: "All growth permanently tax-free"
-
-# --------------------------------------------------------------------------
-# CURRENT HOLDINGS (update after every trade)
-# --------------------------------------------------------------------------
-current_holdings:
-  taxable:
-    SGOV:
-      shares: 976.121
-      current_value: 98236.82
-  roth_ira:
-    JAAA:
-      shares: 911.651
-      current_value: 46047.30
 
 # --------------------------------------------------------------------------
 # TAX-LOCATION RULES
@@ -42,11 +32,13 @@ tax_location:
     - "high_turnover"                   # Momentum-driven, expected hold < 12 months
     - "biotech_smallcap"                # Highest volatility and rebalancing frequency
     - "momentum_tilt_only"              # Flagged as momentum, not fundamental overweight
+    - "thematic_etf"                    # Thematic ETFs (ARKK, BOTZ, etc.) — high turnover
   taxable:
     - "broad_etf_longterm"              # Broad ETFs held > 12 months
     - "geographic_etf"                  # EEM, INDA, EWZ, VGK — foreign tax credit eligible
     - "cash_short_duration"             # BIL, short-duration fixed income
     - "energy_materials_etf"            # Lower turnover, structural diversifier
+    - "industry_etf"                    # Sub-sector industry ETFs — moderate turnover
     - "tax_loss_harvest_candidate"      # Positions with TLH opportunity
   split_threshold: 10000               # Never split a position across accounts unless > $10k
 
@@ -54,6 +46,7 @@ tax_location:
 # TICKER UNIVERSES
 # --------------------------------------------------------------------------
 tickers:
+  # === CORE SECTOR ETFs (11 GICS sectors) ===
   sector_etfs:
     - XLK   # Technology
     - XLV   # Healthcare
@@ -67,6 +60,55 @@ tickers:
     - XLC   # Communication Services
     - XLY   # Consumer Discretionary
 
+  # === INDUSTRY / SUB-SECTOR ETFs (granular bets within sectors) ===
+  industry_etfs:
+    # Technology sub-sectors
+    - SOXX  # Semiconductors (iShares)
+    - IGV   # Software (iShares Expanded Tech-Software)
+    - HACK  # Cybersecurity (ETFMG Prime Cyber Security)
+    - SKYY  # Cloud Computing (First Trust)
+    # Healthcare sub-sectors
+    - XBI   # Biotech (SPDR S&P Biotech — equal-weight)
+    - IHI   # Medical Devices (iShares)
+    - XPH   # Pharmaceuticals (SPDR S&P)
+    # Financials sub-sectors
+    - KBE   # Banks (SPDR S&P Bank)
+    - KRE   # Regional Banks (SPDR S&P)
+    - IAI   # Broker-Dealers & Securities Exchanges (iShares)
+    # Consumer sub-sectors
+    - XHB   # Homebuilders (SPDR S&P)
+    - XRT   # Retail (SPDR S&P — equal-weight)
+    - IBUY  # Online Retail (Amplify)
+    # Industrials sub-sectors
+    - ITA   # Aerospace & Defense (iShares)
+    - IYT   # Transportation (iShares)
+    # Energy sub-sectors
+    - XOP   # Oil & Gas Exploration (SPDR S&P)
+    - OIH   # Oil Services (VanEck)
+    # Real Estate sub-sectors
+    - VNQ   # Vanguard Real Estate (broader than XLRE)
+
+  # === THEMATIC ETFs (cross-sector megatrend exposure) ===
+  thematic_etfs:
+    - BOTZ  # Robotics & AI (Global X)
+    - LIT   # Lithium & Battery Tech (Global X)
+    - ICLN  # Clean Energy (iShares Global)
+    - TAN   # Solar (Invesco)
+    - QCLN  # Clean Edge Green Energy (First Trust)
+    - ARKK  # Disruptive Innovation (ARK)
+    - ARKG  # Genomic Revolution (ARK)
+    - ARKW  # Next Generation Internet (ARK)
+    - SMH   # Semiconductors (VanEck — more concentrated than SOXX)
+    - KOMP  # New Economies Composite (SPDR Kensho)
+    - UFO   # Space (Procure)
+    - DRIV  # Autonomous & EV Technology (Global X)
+    - URNM  # Uranium Mining (Sprott)
+    - URA   # Uranium (Global X)
+    - REMX  # Rare Earth / Strategic Metals (VanEck)
+    - COPX  # Copper Miners (Global X)
+    - AIQ   # AI & Technology (Global X)
+
+  # === GEOGRAPHIC ETFs ===
   geographic_etfs:
     - EEM   # Emerging Markets
     - INDA  # India
@@ -75,18 +117,26 @@ tickers:
     - FXI   # China Large-Cap
     - EWY   # South Korea
     - EWT   # Taiwan
+    - EWJ   # Japan
+    - KWEB  # China Internet (KraneShares)
+    - VWO   # Vanguard FTSE Emerging Markets (broader than EEM)
 
+  # === FACTOR ETFs ===
   factor_etfs:
     - MTUM  # Momentum
     - VLUE  # Value
     - USMV  # Min Volatility
     - QUAL  # Quality
     - SIZE  # Size
+    - COWZ  # Cash Flow (Pacer US Cash Cows 100)
+    - QQQM  # Nasdaq 100 (Invesco, lower cost than QQQ)
 
+  # === VOLATILITY / VIX ===
   volatility:
     - "^VIX"
     - "^VIX3M"
 
+  # === BENCHMARKS ===
   benchmarks:
     - SPY   # S&P 500
     - QQQ   # Nasdaq 100
@@ -96,9 +146,12 @@ tickers:
     - TLT   # 20+ Year Treasury
     - BIL   # 1-3 Month T-Bill
 
-  # Thematic watchlists — validated and expanded in Phase 3B
+  # ===========================================================================
+  # THEMATIC WATCHLISTS (individual stocks — 3-5% position sizing in Roth)
+  # ===========================================================================
   # ITCI removed (acquired by J&J Apr 2025, delisted)
   # PANW removed (market cap ~$120B, exceeds $40B mid-cap threshold)
+
   watchlist_biotech:
     - NBIX   # Neurocrine Biosciences — CNS pipeline
     - EXEL   # Exelixis — oncology
@@ -154,6 +207,39 @@ tickers:
     - TECK   # Teck Resources (copper/zinc)
     - NEM    # Newmont (gold — inflation hedge)
 
+  watchlist_semiconductors:
+    - AVGO   # Broadcom — networking/AI chips
+    - MRVL   # Marvell — data infrastructure
+    - AMAT   # Applied Materials — equipment
+    - LRCX   # Lam Research — equipment
+    - KLAC   # KLA Corp — inspection/metrology
+    - ON     # ON Semiconductor — power/auto
+    - MPWR   # Monolithic Power — analog
+    - CRUS   # Cirrus Logic — mixed-signal
+    - RMBS   # Rambus — memory interface
+    - WOLF   # Wolfspeed — SiC power
+
+  watchlist_energy_transition:
+    - ENPH   # Enphase Energy — micro-inverters
+    - SEDG   # SolarEdge — solar inverters
+    - FSLR   # First Solar — utility-scale panels
+    - RUN    # Sunrun — residential solar
+    - PLUG   # Plug Power — hydrogen fuel cells
+    - BWXT   # BWX Technologies — nuclear
+    - LEU    # Centrus Energy — nuclear enrichment
+    - VST    # Vistra Energy — power/nuclear
+    - CEG    # Constellation Energy — nuclear fleet
+    - NNE    # Nano Nuclear Energy — micro-reactors
+
+  watchlist_fintech:
+    - SQ     # Block (Square) — payments/crypto
+    - AFRM   # Affirm — BNPL
+    - SOFI   # SoFi Technologies — digital banking
+    - UPST   # Upstart — AI lending
+    - HOOD   # Robinhood — retail trading
+    - NU     # Nu Holdings — LatAm digital bank
+    - COIN   # Coinbase — crypto exchange
+
   # Mega-cap exclusion list for AI Software watchlist
   ai_software_exclude:
     - NVDA
@@ -171,6 +257,9 @@ tickers:
     ai_software_max_m: 40000 # $40B maximum (mid-cap focus)
     defense_min_m: 1000      # $1B minimum
     materials_min_m: 500     # $500M minimum
+    semiconductors_min_m: 2000  # $2B minimum
+    energy_transition_min_m: 500
+    fintech_min_m: 1000
 
 # --------------------------------------------------------------------------
 # FRED MACROECONOMIC SERIES
@@ -190,7 +279,7 @@ fred:
 # SEC EDGAR SETTINGS
 # --------------------------------------------------------------------------
 sec_edgar:
-  user_agent: "QuantSystemBuilder/1.0 (gabop98@gmail.com)"
+  user_agent: "QuantSystemBuilder/1.0 (your_email@domain.com)"
   rate_limit_sleep: 0.15        # seconds between API calls (10 req/s limit)
   filing_types:
     - "10-K"
@@ -236,41 +325,52 @@ factor_model:
 # --------------------------------------------------------------------------
 # CVaR OPTIMIZATION PARAMETERS (Section 5, 8.1)
 # --------------------------------------------------------------------------
+# AGGRESSIVE PROFILE: 95-100% equity in Offense, 15-30% cash in Defense
+# --------------------------------------------------------------------------
 optimizer:
   cvar_confidence: 0.95             # 95% CVaR
   tail_correlation_percentile: 10   # Longin-Solnik: joint returns below 10th percentile
   em_weight_reduction_range: [0.20, 0.35]  # Expected EM reduction vs. naive CVaR
 
-  # Regime-conditional allocation bands (Section 8.1)
+  # Regime-conditional allocation bands — AGGRESSIVE GROWTH
+  # The sum of all asset class upper bounds should allow ≥95% equity in Offense.
   allocation_bands:
     us_equities:
-      panic: [0.00, 0.05]
-      defense: [0.10, 0.25]
-      offense: [0.40, 0.60]
+      panic: [0.05, 0.15]          # Was [0.00, 0.05] — keep skin in the game
+      defense: [0.20, 0.40]        # Was [0.10, 0.25] — stay more invested
+      offense: [0.55, 0.75]        # Was [0.40, 0.60] — aggressive core
     intl_developed:
-      panic: [0.00, 0.00]
-      defense: [0.05, 0.15]
-      offense: [0.15, 0.25]
+      panic: [0.00, 0.05]          # Was [0.00, 0.00] — small intl hedge
+      defense: [0.05, 0.15]        # Unchanged
+      offense: [0.15, 0.25]        # Unchanged — intl developed stays moderate
     em_equities:
-      panic: [0.00, 0.00]
-      defense: [0.00, 0.08]
-      offense: [0.08, 0.15]
+      panic: [0.00, 0.02]          # Was [0.00, 0.00] — tiny EM position OK
+      defense: [0.02, 0.10]        # Was [0.00, 0.08]
+      offense: [0.10, 0.20]        # Was [0.08, 0.15] — more EM upside
     energy_materials:
-      panic: [0.00, 0.05]
-      defense: [0.05, 0.15]
-      offense: [0.10, 0.20]
+      panic: [0.00, 0.05]          # Unchanged
+      defense: [0.05, 0.15]        # Unchanged
+      offense: [0.10, 0.20]        # Unchanged
     healthcare:
-      panic: [0.05, 0.10]
-      defense: [0.10, 0.20]
-      offense: [0.10, 0.18]
+      panic: [0.05, 0.15]          # Was [0.05, 0.10] — healthcare as defense
+      defense: [0.10, 0.20]        # Unchanged
+      offense: [0.10, 0.18]        # Unchanged
+    industry_sub:
+      panic: [0.00, 0.00]          # NEW — industry ETFs sit out in Panic
+      defense: [0.00, 0.05]        # NEW — minimal in Defense
+      offense: [0.05, 0.15]        # NEW — tilt to sub-sectors in Offense
+    thematic:
+      panic: [0.00, 0.00]          # NEW — thematics fully off in Panic
+      defense: [0.00, 0.05]        # NEW — tiny thematic in Defense
+      offense: [0.05, 0.15]        # NEW — meaningful thematic in Offense
     cash_short_duration:
-      panic: [0.70, 1.00]
-      defense: [0.30, 0.60]
-      offense: [0.05, 0.15]
+      panic: [0.50, 0.80]          # Was [0.70, 1.00] — less cash even in Panic
+      defense: [0.15, 0.30]        # Was [0.30, 0.60] — cut cash in Defense
+      offense: [0.00, 0.05]        # Was [0.05, 0.15] — near-zero cash in Offense
     vix_overlay_notional:
-      panic: [0.00, 0.02]
-      defense: [0.02, 0.04]
-      offense: [0.005, 0.015]
+      panic: [0.00, 0.02]          # Unchanged
+      defense: [0.02, 0.04]        # Unchanged
+      offense: [0.005, 0.015]      # Unchanged
 
 # --------------------------------------------------------------------------
 # VIX OVERLAY PARAMETERS (Section 8.3)
@@ -327,7 +427,7 @@ alerts:
     enabled: true
   google_sheets:
     # Service account JSON from env: GOOGLE_SHEETS_CREDENTIALS
-    spreadsheet_name: "Sector Rotation Log"
+    spreadsheet_name: "Sector Rotation Daily Log"
     enabled: true
 
 # --------------------------------------------------------------------------
@@ -359,7 +459,7 @@ probabilistic_triggers:
 stock_screener:
   top_holdings_count: 20            # Pull top N holdings from each overweight ETF
   min_price_history_days: 252       # Minimum trading days needed for scoring
-  watchlist_pos_pct: 0.02           # Each watchlist position = 2% of assigned account
+  watchlist_pos_pct: 0.04           # Each watchlist position = 4% of assigned account (was 2%)
   scoring_weights:
     momentum: 0.30                  # 12-1 month momentum rank
     quality: 0.25                   # ROE + gross margin + OCF yield

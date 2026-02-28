@@ -592,8 +592,60 @@ def score_materials_watchlist(tickers: List[str], prices: pd.DataFrame, cfg: dic
     return df
 
 
+def score_generic_watchlist(
+    tickers: List[str], prices: pd.DataFrame, cfg: dict,
+    watchlist_name: str, default_account: str = "roth_ira",
+) -> pd.DataFrame:
+    """Generic scoring function for watchlists without custom logic.
+    Uses the standard momentum/quality/value/size composite.
+    """
+    weights = cfg.get("stock_screener", {}).get("scoring_weights", {})
+    w_mom = weights.get("momentum", 0.30)
+    w_qual = weights.get("quality", 0.25)
+    w_val = weights.get("value", 0.25)
+    w_size = weights.get("size", 0.20)
+
+    records = []
+    for ticker in tickers:
+        info = _fetch_ticker_info(ticker)
+        if info.get("error"):
+            continue
+
+        mom = score_momentum_stock(prices, ticker)
+        quality = compute_quality_score(info)
+        value = compute_value_score(info)
+        mcap_m = info.get("market_cap_m", 0)
+
+        composite = w_mom * (mom if not np.isnan(mom) else 0) + \
+                    w_qual * quality + \
+                    w_val * value + \
+                    w_size * compute_size_score(mcap_m)
+
+        label = apply_valuation_filter(info, cfg)
+
+        records.append({
+            "ticker": ticker,
+            "watchlist": watchlist_name,
+            "short_name": info.get("short_name", ticker),
+            "market_cap_m": mcap_m,
+            "price": info.get("price"),
+            "forward_pe": info.get("forward_pe"),
+            "momentum": round(mom if not np.isnan(mom) else 0, 4),
+            "quality_score": round(quality, 4),
+            "value_score": round(value, 4),
+            "composite_score": round(composite, 4),
+            "valuation_label": label,
+            "account": default_account,
+        })
+
+    df = pd.DataFrame(records) if records else pd.DataFrame()
+    if not df.empty:
+        df = df.sort_values("composite_score", ascending=False).reset_index(drop=True)
+    return df
+
+
 def run_all_watchlists(cfg: dict, prices: pd.DataFrame = None) -> Dict[str, pd.DataFrame]:
-    """Score all four thematic watchlists.
+    """Score all thematic watchlists.
     Returns dict of watchlist_name -> scored DataFrame.
     """
     results = {}
@@ -601,7 +653,9 @@ def run_all_watchlists(cfg: dict, prices: pd.DataFrame = None) -> Dict[str, pd.D
     # Collect all tickers for price download
     all_wl_tickers = []
     for key in ["watchlist_biotech", "watchlist_ai_software",
-                 "watchlist_defense", "watchlist_green_materials"]:
+                 "watchlist_defense", "watchlist_green_materials",
+                 "watchlist_semiconductors", "watchlist_energy_transition",
+                 "watchlist_fintech"]:
         all_wl_tickers.extend(cfg.get("tickers", {}).get(key, []))
 
     if prices is None and all_wl_tickers:
@@ -624,6 +678,22 @@ def run_all_watchlists(cfg: dict, prices: pd.DataFrame = None) -> Dict[str, pd.D
     mats = cfg.get("tickers", {}).get("watchlist_green_materials", [])
     results["green_materials"] = score_materials_watchlist(mats, prices, cfg)
     logger.info("Materials watchlist: %d scored", len(results["green_materials"]))
+
+    # New watchlists — use generic scoring
+    semis = cfg.get("tickers", {}).get("watchlist_semiconductors", [])
+    if semis:
+        results["semiconductors"] = score_generic_watchlist(semis, prices, cfg, "semiconductors", "roth_ira")
+        logger.info("Semiconductors watchlist: %d scored", len(results["semiconductors"]))
+
+    energy_tr = cfg.get("tickers", {}).get("watchlist_energy_transition", [])
+    if energy_tr:
+        results["energy_transition"] = score_generic_watchlist(energy_tr, prices, cfg, "energy_transition", "roth_ira")
+        logger.info("Energy Transition watchlist: %d scored", len(results["energy_transition"]))
+
+    fintech = cfg.get("tickers", {}).get("watchlist_fintech", [])
+    if fintech:
+        results["fintech"] = score_generic_watchlist(fintech, prices, cfg, "fintech", "roth_ira")
+        logger.info("Fintech watchlist: %d scored", len(results["fintech"]))
 
     return results
 
@@ -889,6 +959,12 @@ def _generate_mock_watchlist_data(cfg: dict) -> Dict[str, pd.DataFrame]:
                      ["momentum", "quality_score", "value_score", "backlog_proxy"]),
         "green_materials": ("watchlist_green_materials", "taxable",
                              ["momentum", "quality_score", "value_score", "cost_curve_score"]),
+        "semiconductors": ("watchlist_semiconductors", "roth_ira",
+                            ["momentum", "quality_score", "value_score"]),
+        "energy_transition": ("watchlist_energy_transition", "roth_ira",
+                               ["momentum", "quality_score", "value_score"]),
+        "fintech": ("watchlist_fintech", "roth_ira",
+                     ["momentum", "quality_score", "value_score"]),
     }
 
     labels = ["FUNDAMENTAL_BUY", "MOMENTUM_ONLY", "AVOID"]

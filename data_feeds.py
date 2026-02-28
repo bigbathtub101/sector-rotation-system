@@ -166,10 +166,12 @@ def init_database(db_path: Path = DB_PATH) -> sqlite3.Connection:
 def _get_all_tickers(cfg: dict) -> List[str]:
     """Flatten all ticker lists from config into a single deduplicated list."""
     tickers = []
-    for key in ["sector_etfs", "geographic_etfs", "factor_etfs",
-                 "volatility", "benchmarks",
+    for key in ["sector_etfs", "geographic_etfs", "industry_etfs", "thematic_etfs",
+                 "factor_etfs", "volatility", "benchmarks",
                  "watchlist_biotech", "watchlist_ai_software",
-                 "watchlist_defense", "watchlist_green_materials"]:
+                 "watchlist_defense", "watchlist_green_materials",
+                 "watchlist_semiconductors", "watchlist_energy_transition",
+                 "watchlist_fintech"]:
         tickers.extend(cfg["tickers"].get(key, []))
     # Deduplicate while preserving order
     seen = set()
@@ -644,7 +646,9 @@ def fetch_all_filings(
 
         # Add watchlist tickers
         for key in ["watchlist_biotech", "watchlist_ai_software",
-                     "watchlist_defense", "watchlist_green_materials"]:
+                     "watchlist_defense", "watchlist_green_materials",
+                     "watchlist_semiconductors", "watchlist_energy_transition",
+                     "watchlist_fintech"]:
             tickers.extend(cfg["tickers"].get(key, []))
 
     # Deduplicate while preserving order

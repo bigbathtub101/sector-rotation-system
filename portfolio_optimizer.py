@@ -464,16 +464,31 @@ def run_cvar_optimization(
 
 # Asset class mapping: ticker -> asset_class key in config
 ASSET_CLASS_MAP = {
-    # US Equities (sector ETFs)
+    # US Equities (11 GICS sector ETFs)
     "XLK": "us_equities", "XLV": "healthcare", "XLE": "energy_materials",
     "XLF": "us_equities", "XLI": "us_equities", "XLB": "energy_materials",
     "XLU": "us_equities", "XLP": "us_equities", "XLRE": "us_equities",
     "XLC": "us_equities", "XLY": "us_equities",
+    # Industry / Sub-sector ETFs
+    "SOXX": "industry_sub", "IGV": "industry_sub", "HACK": "industry_sub",
+    "SKYY": "industry_sub", "XBI": "industry_sub", "IHI": "industry_sub",
+    "XPH": "industry_sub", "KBE": "industry_sub", "KRE": "industry_sub",
+    "IAI": "industry_sub", "XHB": "industry_sub", "XRT": "industry_sub",
+    "IBUY": "industry_sub", "ITA": "industry_sub", "IYT": "industry_sub",
+    "XOP": "industry_sub", "OIH": "industry_sub", "VNQ": "industry_sub",
+    # Thematic ETFs
+    "BOTZ": "thematic", "LIT": "thematic", "ICLN": "thematic",
+    "TAN": "thematic", "QCLN": "thematic", "ARKK": "thematic",
+    "ARKG": "thematic", "ARKW": "thematic", "SMH": "thematic",
+    "KOMP": "thematic", "UFO": "thematic", "DRIV": "thematic",
+    "URNM": "thematic", "URA": "thematic", "REMX": "thematic",
+    "COPX": "thematic", "AIQ": "thematic",
     # International Developed
-    "VGK": "intl_developed",
+    "VGK": "intl_developed", "EWJ": "intl_developed",
     # Emerging Markets
     "EEM": "em_equities", "INDA": "em_equities", "EWZ": "em_equities",
     "FXI": "em_equities", "EWY": "em_equities", "EWT": "em_equities",
+    "KWEB": "em_equities", "VWO": "em_equities",
     # Benchmarks / Cash
     "BIL": "cash_short_duration", "AGG": "cash_short_duration",
     "TLT": "cash_short_duration",
@@ -481,7 +496,8 @@ ASSET_CLASS_MAP = {
     "SPY": "us_equities", "QQQ": "us_equities", "IWM": "us_equities",
     # Factor ETFs
     "MTUM": "us_equities", "VLUE": "us_equities", "USMV": "us_equities",
-    "QUAL": "us_equities", "SIZE": "us_equities",
+    "QUAL": "us_equities", "SIZE": "us_equities", "COWZ": "us_equities",
+    "QQQM": "us_equities",
 }
 
 
@@ -589,7 +605,7 @@ def compute_bivector_beta(
     subset = returns[[sector_ticker] + candidate_cols]
 
     # Sort market tickers by available rows descending, keep those with
-    # >= min_obs rows in common with the sector ticker.
+    # ≥ min_obs rows in common with the sector ticker.
     sector_notna = returns[sector_ticker].notna()
     available = {}
     for c in candidate_cols:
@@ -736,9 +752,15 @@ def allocate_dollars(
 
     # Watchlist tickers → Roth
     for key in ["watchlist_biotech", "watchlist_ai_software",
-                "watchlist_defense", "watchlist_green_materials"]:
+                "watchlist_defense", "watchlist_green_materials",
+                "watchlist_semiconductors", "watchlist_energy_transition",
+                "watchlist_fintech"]:
         for t in cfg["tickers"].get(key, []):
             roth_tickers.add(t)
+
+    # Thematic ETFs → Roth (high turnover)
+    for t in cfg["tickers"].get("thematic_etfs", []):
+        roth_tickers.add(t)
 
     # Geographic ETFs → Taxable (foreign tax credit)
     for t in cfg["tickers"].get("geographic_etfs", []):
@@ -958,8 +980,14 @@ def run_portfolio_optimization(
     # --- Step 3: Load price returns for optimization ---
     sector_tickers = cfg["tickers"]["sector_etfs"]
     geo_tickers = cfg["tickers"]["geographic_etfs"]
+    industry_tickers = cfg["tickers"].get("industry_etfs", [])
+    thematic_tickers = cfg["tickers"].get("thematic_etfs", [])
     cash_tickers = ["BIL"]
-    all_opt_tickers = sector_tickers + geo_tickers + cash_tickers
+    all_opt_tickers = sector_tickers + geo_tickers + industry_tickers + thematic_tickers + cash_tickers
+    # Deduplicate while preserving order
+    seen = set()
+    all_opt_tickers = [t for t in all_opt_tickers if not (t in seen or seen.add(t))]
+    logger.info("Optimization universe: %d tickers", len(all_opt_tickers))
 
     placeholders = ",".join(["?"] * len(all_opt_tickers))
     prices = pd.read_sql_query(
