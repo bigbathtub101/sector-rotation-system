@@ -1,5 +1,8 @@
 # Sector Rotation System
 
+[![Open Setup & Backtest in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bigbathtub101/sector-rotation-system/blob/main/notebooks/setup_and_backtest.ipynb)
+[![Open Signal Validation in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bigbathtub101/sector-rotation-system/blob/main/notebooks/validate_signals.ipynb)
+
 A quantitative sector rotation and portfolio allocation system that combines macroeconomic regime detection, CVaR-optimized portfolio construction, thematic stock screening, and NLP sentiment analysis — all running on **free, open-source infrastructure**.
 
 ---
