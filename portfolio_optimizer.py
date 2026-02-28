@@ -447,8 +447,15 @@ def run_cvar_optimization(
         return dict(weights)
 
     except Exception as e:
-        logger.warning("CVaR optimization failed: %s — falling back to band midpoints", e)
-        return {t: (bounds[t][0] + bounds[t][1]) / 2 for t in bounds}
+        logger.warning("CVaR optimization failed: %s — falling back to normalized band midpoints", e)
+        raw = {t: (bounds[t][0] + bounds[t][1]) / 2 for t in bounds}
+        total = sum(raw.values())
+        if total > 0:
+            return {t: w / total for t, w in raw.items()}
+        else:
+            # Absolute last resort: equal weight
+            n = len(bounds)
+            return {t: 1.0 / n for t in bounds} if n > 0 else {}
 
 
 # ===========================================================================

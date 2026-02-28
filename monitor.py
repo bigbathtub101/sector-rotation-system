@@ -113,7 +113,7 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
 def fetch_latest_allocation(conn: sqlite3.Connection) -> Optional[Dict]:
     """Return the most recent allocation from the DB."""
     row = conn.execute(
-        "SELECT date, regime, allocations, taxable_dollars, roth_dollars "
+        "SELECT date, regime, allocation_json, dollar_taxable, dollar_roth "
         "FROM allocations ORDER BY date DESC LIMIT 1"
     ).fetchone()
     if row:
