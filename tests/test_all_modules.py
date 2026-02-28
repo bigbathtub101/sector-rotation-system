@@ -633,7 +633,7 @@ def test_file_structure(tc: TestCounter):
 
     # Check from repo root
     for rel_path in required_files:
-        for base in [REPO_ROOT, PARECNT]:
+        for base in [REPO_ROOT, PARENT]:
             full = base / rel_path
             if full.exists():
                 tc.ok(f"file exists: {rel_path}")
@@ -714,7 +714,7 @@ def test_github_actions(tc: TestCounter):
 
 
 # ============================================================================
-# DOLLAR ANOUNT VALIDATION
+# DOLLAR AMOUNT VALIDATION
 # ============================================================================
 
 def test_dollar_amounts(tc: TestCounter):
