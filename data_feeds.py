@@ -21,6 +21,8 @@ import datetime as dt
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
+import concurrent.futures
+
 import yaml
 import pandas as pd
 import numpy as np
@@ -496,6 +498,24 @@ def get_sector_etf_top_holdings(
 _CIK_CACHE: Dict[str, str] = {}
 
 
+def _prefetch_cik_cache(cfg: dict) -> None:
+    """Pre-fetch all CIKs from company_tickers.json into _CIK_CACHE in one request."""
+    headers = _sec_headers(cfg)
+    try:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        resp = requests.get(url, headers=headers, timeout=30)
+        _sec_sleep(cfg)
+        resp.raise_for_status()
+        for entry in resp.json().values():
+            t = entry.get("ticker", "").upper()
+            cik = str(entry.get("cik_str", ""))
+            if t:
+                _CIK_CACHE[t] = cik
+        logger.info("CIK cache populated with %d entries", len(_CIK_CACHE))
+    except Exception as e:
+        logger.error("Failed to prefetch CIK cache: %s", e)
+
+
 def _sec_headers(cfg: dict) -> dict:
     """Return compliant SEC User-Agent header."""
     config_ua = cfg["sec_edgar"]["user_agent"].strip()
@@ -533,7 +553,51 @@ def _sec_sleep(cfg: dict):
     time.sleep(cfg["sec_edgar"]["rate_limit_sleep"])
 
 
-def lookup_cik(ticker: str, cfg: dict) -> Optional[str]:
+def _download_filing_text(
+    filing_url: str,
+    accession: str,
+    ticker: str,
+    cfg: dict,
+) -> str:
+    """
+    Download the text of a single SEC filing document.
+
+    Uses a reduced timeout (``doc_download_timeout``) and makes up to 2 attempts
+    (1 retry) to avoid hanging. Returns empty string on failure so callers can
+    store metadata-only records.
+    """
+    headers = _sec_headers(cfg)
+    timeout = cfg["sec_edgar"].get("doc_download_timeout", 20)
+    raw_text = ""
+    for attempt in range(2):
+        try:
+            doc_resp = requests.get(filing_url, headers=headers, timeout=timeout)
+            _sec_sleep(cfg)
+            if doc_resp.status_code == 200:
+                raw_text = doc_resp.text[:100_000]
+                break
+            elif doc_resp.status_code == 503:
+                wait = 2 ** attempt
+                logger.warning(
+                    "503 fetching filing %s for %s (attempt %d/2) — retrying in %ds",
+                    accession, ticker, attempt + 1, wait,
+                )
+                time.sleep(wait)
+            else:
+                logger.warning(
+                    "Non-200 status (%d) fetching filing %s for %s",
+                    doc_resp.status_code, accession, ticker,
+                )
+                break
+        except Exception as e:
+            logger.error("Failed to download filing %s for %s: %s", accession, ticker, e)
+            break
+    else:
+        logger.warning("All retries exhausted for filing %s for %s", accession, ticker)
+    return raw_text
+
+
+
     """
     Look up a company's CIK number from SEC EDGAR company tickers JSON.
     """
@@ -565,11 +629,13 @@ def fetch_filings_for_ticker(
     cfg: dict,
     filing_types: List[str] = None,
     max_filings: int = 5,
+    deadline: float = None,
 ) -> List[dict]:
     """
     Fetch recent filings for a single ticker from SEC EDGAR.
 
     Returns a list of dicts with filing metadata and raw text.
+    The ``deadline`` (from ``time.monotonic()``) caps total time spent here.
     """
     if filing_types is None:
         filing_types = cfg["sec_edgar"]["filing_types"]
@@ -605,6 +671,9 @@ def fetch_filings_for_ticker(
     for i, form in enumerate(forms):
         if count >= max_filings:
             break
+        if deadline is not None and time.monotonic() > deadline:
+            logger.info("Time budget exhausted mid-ticker for %s — stopping", ticker)
+            break
         if form not in filing_types:
             continue
 
@@ -618,36 +687,7 @@ def fetch_filings_for_ticker(
             f"{cik}/{accession_path}/{primary_doc}"
         )
 
-        # Attempt to download filing text with exponential backoff on 503
-        raw_text = ""
-        for attempt in range(3):
-            try:
-                doc_resp = requests.get(filing_url, headers=headers, timeout=60)
-                _sec_sleep(cfg)
-                if doc_resp.status_code == 200:
-                    # Take first 100KB to avoid memory issues
-                    raw_text = doc_resp.text[:100_000]
-                    break
-                elif doc_resp.status_code == 503:
-                    wait = 2 ** attempt
-                    logger.warning(
-                        "503 fetching filing %s for %s (attempt %d/3) — retrying in %ds",
-                        accession, ticker, attempt + 1, wait,
-                    )
-                    time.sleep(wait)
-                else:
-                    logger.warning(
-                        "Non-200 status (%d) fetching filing %s for %s",
-                        doc_resp.status_code, accession, ticker,
-                    )
-                    break
-            except Exception as e:
-                logger.error("Failed to download filing %s for %s: %s", accession, ticker, e)
-                break
-        else:
-            logger.warning(
-                "All retries exhausted for filing %s for %s", accession, ticker,
-            )
+        raw_text = _download_filing_text(filing_url, accession, ticker, cfg)
 
         results.append({
             "cik": cik,
@@ -672,6 +712,8 @@ def fetch_filings_via_efts(
     tickers: List[str],
     filing_types: List[str] = None,
     max_filings_per_ticker: int = 5,
+    cik_to_ticker: Dict[str, str] = None,
+    deadline: float = None,
 ) -> List[dict]:
     """
     Fetch filing metadata for a list of tickers using the SEC EFTS full-text
@@ -679,6 +721,12 @@ def fetch_filings_via_efts(
 
     This is faster than hitting /submissions/ per-ticker because it can
     discover filings for many tickers in batched queries.
+
+    Uses CIK-based matching (via ``cik_to_ticker``) when provided, which is
+    much more reliable than matching ticker symbols inside entity names.
+
+    Phase 1 collects metadata for all batches; Phase 2 downloads filing text
+    concurrently via ThreadPoolExecutor.
 
     Returns a list of filing dicts (same schema as fetch_filings_for_ticker),
     with raw_text populated by a subsequent download from the Archives URL.
@@ -690,13 +738,20 @@ def fetch_filings_via_efts(
         "efts_search_url", "https://efts.sec.gov/LATEST/search-index"
     )
     batch_size = cfg["sec_edgar"].get("efts_batch_size", 10)
+    max_workers = cfg["sec_edgar"].get("max_concurrent_downloads", 5)
     headers = _sec_headers(cfg)
     archives_url = cfg["sec_edgar"]["archives_url"]
 
-    all_filings: List[dict] = []
+    # Phase 1: collect filing metadata (no text downloads yet)
+    metadata: List[dict] = []
+    ticker_counts: Dict[str, int] = {}
+    tickers_set = set(t.upper() for t in tickers)
 
-    # Process tickers in batches
     for batch_start in range(0, len(tickers), batch_size):
+        if deadline is not None and time.monotonic() > deadline:
+            logger.info("Time budget exhausted in EFTS metadata collection — stopping early")
+            break
+
         batch = tickers[batch_start:batch_start + batch_size]
         # Build quoted ticker query  e.g. "NVDA" OR "AAPL"
         q_terms = " OR ".join(f'"{t}"' for t in batch)
@@ -732,29 +787,19 @@ def fetch_filings_via_efts(
             logger.warning("EFTS returned 0 hits for batch %s", batch)
             continue
 
-        # Count per ticker so we respect max_filings_per_ticker
-        ticker_counts: Dict[str, int] = {}
-
         for hit in hits:
             src = hit.get("_source", {})
             form_type = src.get("form_type", "")
             if form_type not in filing_types:
                 continue
 
-            # EFTS returns entity_name + display_names; match back to ticker
-            display_names = src.get("display_names", [])
-            # display_names is a list of "Name (CIK NNNNNN)" strings
-            filing_ticker = ""
             cik = src.get("entity_id", "")
-            # Try to match to one of our batch tickers by reverse-CIK lookup
-            # (we may not have the CIK yet, so just record what EFTS gives us)
             entity_name = src.get("entity_name", "")
 
             accession_raw = src.get("file_num", "") or src.get("accession_no", "")
             # EFTS stores accession as "0001234567-24-000001"
             accession = accession_raw.replace("-", "") if accession_raw else ""
             filing_date = src.get("period_of_report", "") or src.get("file_date", "")
-            primary_doc = src.get("file_num", "")  # not always present
 
             # Build the archives URL from CIK + accession
             # CIK in EFTS is zero-padded 10-digit
@@ -764,45 +809,26 @@ def fetch_filings_via_efts(
 
             filing_url = f"{archives_url}{cik_str}/{accession}/"
 
-            # Match the hit back to one of the tickers we queried
+            # Match the hit back to one of the tickers we queried.
+            # Prefer CIK-based matching (reliable) over entity-name matching (fragile).
             matched_ticker = ""
-            for t in batch:
-                if t.upper() in entity_name.upper():
-                    matched_ticker = t
-                    break
+            if cik_to_ticker:
+                candidate = cik_to_ticker.get(cik_str, "")
+                if candidate and candidate.upper() in tickers_set:
+                    matched_ticker = candidate
+            if not matched_ticker:
+                # Fallback: entity-name substring match (original behaviour)
+                for t in batch:
+                    if t.upper() in entity_name.upper():
+                        matched_ticker = t
+                        break
             if not matched_ticker:
                 continue
 
             if ticker_counts.get(matched_ticker, 0) >= max_filings_per_ticker:
                 continue
 
-            # Download filing text
-            raw_text = ""
-            for attempt in range(3):
-                try:
-                    doc_resp = requests.get(filing_url, headers=headers, timeout=60)
-                    _sec_sleep(cfg)
-                    if doc_resp.status_code == 200:
-                        raw_text = doc_resp.text[:100_000]
-                        break
-                    elif doc_resp.status_code == 503:
-                        wait = 2 ** attempt
-                        logger.warning(
-                            "503 fetching EFTS filing %s (attempt %d/3) — retrying in %ds",
-                            accession_raw, attempt + 1, wait,
-                        )
-                        time.sleep(wait)
-                    else:
-                        logger.warning(
-                            "Non-200 status (%d) fetching EFTS filing %s",
-                            doc_resp.status_code, accession_raw,
-                        )
-                        break
-                except Exception as e:
-                    logger.error("Failed to download EFTS filing %s: %s", accession_raw, e)
-                    break
-
-            all_filings.append({
+            metadata.append({
                 "cik": cik_str,
                 "ticker": matched_ticker,
                 "company_name": entity_name,
@@ -811,10 +837,27 @@ def fetch_filings_via_efts(
                 "accession_number": accession_raw,
                 "primary_document": src.get("file_num", ""),
                 "filing_url": filing_url,
-                "raw_text": raw_text,
+                "raw_text": "",
                 "fetched_at": dt.datetime.utcnow().isoformat(),
             })
             ticker_counts[matched_ticker] = ticker_counts.get(matched_ticker, 0) + 1
+
+    logger.info(
+        "EFTS metadata: %d filings for %d tickers — downloading text with %d workers",
+        len(metadata), len(tickers), max_workers,
+    )
+
+    # Phase 2: download filing text concurrently
+    def _dl(item: dict) -> dict:
+        if deadline is not None and time.monotonic() > deadline:
+            return item  # skip download — return metadata-only record
+        item["raw_text"] = _download_filing_text(
+            item["filing_url"], item["accession_number"], item["ticker"], cfg
+        )
+        return item
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        all_filings = list(executor.map(_dl, metadata))
 
     logger.info("EFTS: fetched %d filings for %d tickers", len(all_filings), len(tickers))
     return all_filings
@@ -833,6 +876,10 @@ def fetch_all_filings(
 
     Primary path: EFTS full-text search API (faster, batch queries).
     Fallback: per-ticker /submissions/ endpoint (original approach).
+
+    A global time budget (``sec_edgar.max_fetch_time_seconds``, default 300 s)
+    caps total wall-clock time so the process never hangs indefinitely.
+    Partial results are returned when the budget is exhausted.
     """
     if tickers is None:
         tickers = []
@@ -855,12 +902,23 @@ def fetch_all_filings(
     # Deduplicate while preserving order
     tickers = list(dict.fromkeys(tickers))
 
+    # Global time budget
+    max_time = cfg["sec_edgar"].get("max_fetch_time_seconds", 300)
+    deadline = time.monotonic() + max_time
+
+    # Pre-fetch CIK map once so EFTS can use CIK-based matching
+    if not _CIK_CACHE:
+        _prefetch_cik_cache(cfg)
+    cik_to_ticker = {v: k for k, v in _CIK_CACHE.items() if v}
+
     use_efts = cfg["sec_edgar"].get("use_efts_primary", True)
 
     if use_efts:
         logger.info("Using EFTS as primary filing discovery for %d tickers", len(tickers))
         try:
-            all_filings = fetch_filings_via_efts(cfg, tickers)
+            all_filings = fetch_filings_via_efts(
+                cfg, tickers, cik_to_ticker=cik_to_ticker, deadline=deadline
+            )
             if all_filings is not None and len(all_filings) > 0:
                 logger.info("EFTS succeeded: %d filings fetched", len(all_filings))
                 logger.info("Total filings fetched: %d for %d tickers", len(all_filings), len(tickers))
@@ -876,9 +934,21 @@ def fetch_all_filings(
     # Fallback: per-ticker submissions approach
     logger.info("Using per-ticker submissions fallback for %d tickers", len(tickers))
     all_filings = []
-    for ticker in tickers:
-        filings = fetch_filings_for_ticker(ticker, cfg)
+    for i, ticker in enumerate(tickers):
+        if time.monotonic() > deadline:
+            logger.warning(
+                "Time budget exhausted after %d/%d tickers — returning %d partial filings",
+                i, len(tickers), len(all_filings),
+            )
+            break
+        filings = fetch_filings_for_ticker(ticker, cfg, deadline=deadline)
         all_filings.extend(filings)
+        if (i + 1) % 10 == 0:
+            elapsed = time.monotonic() - (deadline - max_time)
+            logger.info(
+                "Per-ticker fallback: %d/%d tickers done, %d filings so far, %.0fs elapsed",
+                i + 1, len(tickers), len(all_filings), elapsed,
+            )
 
     logger.info("Total filings fetched: %d for %d tickers", len(all_filings), len(tickers))
     return all_filings
