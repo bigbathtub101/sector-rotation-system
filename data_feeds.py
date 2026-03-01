@@ -11,6 +11,7 @@ Dependencies: yfinance, pandas, requests, pyyaml, fredapi, sqlite3
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -497,14 +498,34 @@ _CIK_CACHE: Dict[str, str] = {}
 
 def _sec_headers(cfg: dict) -> dict:
     """Return compliant SEC User-Agent header."""
-    ua = cfg["sec_edgar"]["user_agent"].strip()
+    config_ua = cfg["sec_edgar"]["user_agent"].strip()
+    ua = config_ua
+
     # Allow override via environment variable
     email = os.environ.get("SEC_EDGAR_EMAIL", "")
     if email:
-        # Colab Secrets can inject \r\n — strip AND replace explicitly
-        email = email.strip().replace("\r", "").replace("\n", "")
-        ua = f"QuantSystemBuilder/1.0 ({email})"
-    return {"User-Agent": ua.strip(), "Accept-Encoding": "gzip, deflate"}
+        # Strip ALL control characters (anything outside printable ASCII 0x20-0x7E)
+        # Colab Secrets can inject \r\n and other invisible characters
+        email = re.sub(r"[^\x20-\x7E]", "", email).strip()
+        if email:
+            candidate_ua = f"QuantSystemBuilder/1.0 ({email})"
+            # Final validation — strip control chars from the full string too
+            candidate_ua = re.sub(r"[^\x20-\x7E]", "", candidate_ua).strip()
+            if "\r" in candidate_ua or "\n" in candidate_ua or not candidate_ua:
+                logger.warning(
+                    "SEC_EDGAR_EMAIL produced an invalid User-Agent after sanitization "
+                    "(repr=%r) — falling back to config.yaml user_agent", candidate_ua
+                )
+            else:
+                ua = candidate_ua
+        else:
+            logger.warning(
+                "SEC_EDGAR_EMAIL was set but contained only control characters — "
+                "falling back to config.yaml user_agent"
+            )
+
+    logger.debug("SEC User-Agent header value: %r", ua)
+    return {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
 
 
 def _sec_sleep(cfg: dict):
@@ -646,6 +667,153 @@ def fetch_filings_for_ticker(
     return results
 
 
+def fetch_filings_via_efts(
+    cfg: dict,
+    tickers: List[str],
+    filing_types: List[str] = None,
+    max_filings_per_ticker: int = 5,
+) -> List[dict]:
+    """
+    Fetch filing metadata for a list of tickers using the SEC EFTS full-text
+    search API (https://efts.sec.gov/LATEST/search-index).
+
+    This is faster than hitting /submissions/ per-ticker because it can
+    discover filings for many tickers in batched queries.
+
+    Returns a list of filing dicts (same schema as fetch_filings_for_ticker),
+    with raw_text populated by a subsequent download from the Archives URL.
+    """
+    if filing_types is None:
+        filing_types = cfg["sec_edgar"]["filing_types"]
+
+    efts_url = cfg["sec_edgar"].get(
+        "efts_search_url", "https://efts.sec.gov/LATEST/search-index"
+    )
+    batch_size = cfg["sec_edgar"].get("efts_batch_size", 10)
+    headers = _sec_headers(cfg)
+    archives_url = cfg["sec_edgar"]["archives_url"]
+
+    all_filings: List[dict] = []
+
+    # Process tickers in batches
+    for batch_start in range(0, len(tickers), batch_size):
+        batch = tickers[batch_start:batch_start + batch_size]
+        # Build quoted ticker query  e.g. "NVDA" OR "AAPL"
+        q_terms = " OR ".join(f'"{t}"' for t in batch)
+        forms_param = ",".join(filing_types)
+
+        params = {
+            "q": q_terms,
+            "forms": forms_param,
+            "dateRange": "custom",
+            "startdt": (
+                dt.date.today() - dt.timedelta(days=365 * 3)
+            ).isoformat(),
+            "enddt": dt.date.today().isoformat(),
+        }
+
+        try:
+            resp = requests.get(efts_url, params=params, headers=headers, timeout=30)
+            _sec_sleep(cfg)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.error("EFTS query failed for batch %s: %s", batch, e)
+            return []  # signal failure so caller can fall back
+
+        hits = data.get("hits", {}).get("hits", [])
+        if not hits:
+            logger.debug("EFTS returned 0 hits for batch %s", batch)
+            continue
+
+        # Count per ticker so we respect max_filings_per_ticker
+        ticker_counts: Dict[str, int] = {}
+
+        for hit in hits:
+            src = hit.get("_source", {})
+            form_type = src.get("form_type", "")
+            if form_type not in filing_types:
+                continue
+
+            # EFTS returns entity_name + display_names; match back to ticker
+            display_names = src.get("display_names", [])
+            # display_names is a list of "Name (CIK NNNNNN)" strings
+            filing_ticker = ""
+            cik = src.get("entity_id", "")
+            # Try to match to one of our batch tickers by reverse-CIK lookup
+            # (we may not have the CIK yet, so just record what EFTS gives us)
+            entity_name = src.get("entity_name", "")
+
+            accession_raw = src.get("file_num", "") or src.get("accession_no", "")
+            # EFTS stores accession as "0001234567-24-000001"
+            accession = accession_raw.replace("-", "") if accession_raw else ""
+            filing_date = src.get("period_of_report", "") or src.get("file_date", "")
+            primary_doc = src.get("file_num", "")  # not always present
+
+            # Build the archives URL from CIK + accession
+            # CIK in EFTS is zero-padded 10-digit
+            cik_str = str(cik).lstrip("0") if cik else ""
+            if not cik_str or not accession:
+                continue
+
+            filing_url = f"{archives_url}{cik_str}/{accession}/"
+
+            # Match the hit back to one of the tickers we queried
+            matched_ticker = ""
+            for t in batch:
+                if t.upper() in entity_name.upper():
+                    matched_ticker = t
+                    break
+            if not matched_ticker:
+                continue
+
+            if ticker_counts.get(matched_ticker, 0) >= max_filings_per_ticker:
+                continue
+
+            # Download filing text
+            raw_text = ""
+            for attempt in range(3):
+                try:
+                    doc_resp = requests.get(filing_url, headers=headers, timeout=60)
+                    _sec_sleep(cfg)
+                    if doc_resp.status_code == 200:
+                        raw_text = doc_resp.text[:100_000]
+                        break
+                    elif doc_resp.status_code == 503:
+                        wait = 2 ** attempt
+                        logger.warning(
+                            "503 fetching EFTS filing %s (attempt %d/3) — retrying in %ds",
+                            accession_raw, attempt + 1, wait,
+                        )
+                        time.sleep(wait)
+                    else:
+                        logger.warning(
+                            "Non-200 status (%d) fetching EFTS filing %s",
+                            doc_resp.status_code, accession_raw,
+                        )
+                        break
+                except Exception as e:
+                    logger.error("Failed to download EFTS filing %s: %s", accession_raw, e)
+                    break
+
+            all_filings.append({
+                "cik": cik_str,
+                "ticker": matched_ticker,
+                "company_name": entity_name,
+                "filing_type": form_type,
+                "filing_date": filing_date,
+                "accession_number": accession_raw,
+                "primary_document": src.get("file_num", ""),
+                "filing_url": filing_url,
+                "raw_text": raw_text,
+                "fetched_at": dt.datetime.utcnow().isoformat(),
+            })
+            ticker_counts[matched_ticker] = ticker_counts.get(matched_ticker, 0) + 1
+
+    logger.info("EFTS: fetched %d filings for %d tickers", len(all_filings), len(tickers))
+    return all_filings
+
+
 def fetch_all_filings(
     cfg: dict,
     tickers: List[str] = None,
@@ -656,6 +824,9 @@ def fetch_all_filings(
 
     If no tickers are provided, dynamically resolves top holdings
     per sector ETF via yfinance, then adds all watchlist tickers.
+
+    Primary path: EFTS full-text search API (faster, batch queries).
+    Fallback: per-ticker /submissions/ endpoint (original approach).
     """
     if tickers is None:
         tickers = []
@@ -678,6 +849,21 @@ def fetch_all_filings(
     # Deduplicate while preserving order
     tickers = list(dict.fromkeys(tickers))
 
+    use_efts = cfg["sec_edgar"].get("use_efts_primary", True)
+
+    if use_efts:
+        logger.info("Using EFTS as primary filing discovery for %d tickers", len(tickers))
+        try:
+            all_filings = fetch_filings_via_efts(cfg, tickers)
+            if all_filings is not None:
+                logger.info("EFTS succeeded: %d filings fetched", len(all_filings))
+                logger.info("Total filings fetched: %d for %d tickers", len(all_filings), len(tickers))
+                return all_filings
+        except Exception as e:
+            logger.error("EFTS primary path raised an exception: %s — falling back to submissions", e)
+
+    # Fallback: per-ticker submissions approach
+    logger.info("Using per-ticker submissions fallback for %d tickers", len(tickers))
     all_filings = []
     for ticker in tickers:
         filings = fetch_filings_for_ticker(ticker, cfg)
