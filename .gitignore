@@ -9,3 +9,7 @@ build/
 .env
 *.db
 *.log
+screener_output.json
+sector_top_picks.csv
+screen_*.csv
+watchlist_*.csv
