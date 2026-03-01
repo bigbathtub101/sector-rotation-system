@@ -1,1 +1,482 @@
-PLACEHOLDER_YAML
+# ============================================================================
+# Global Sector Rotation System — Master Configuration
+# ============================================================================
+# All thresholds, parameters, and lists are configurable here.
+# No magic numbers in the codebase — everything references this file.
+# ============================================================================
+# PROFILE: Aggressive Growth — 27yo, beat-the-market objective
+# UPDATED: 2026-02-28
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# PORTFOLIO CONTEXT
+# --------------------------------------------------------------------------
+portfolio:
+  total_value: 144000
+  accounts:
+    taxable:
+      value: 100000
+      type: "Individual Brokerage"
+      tax_treatment: "Capital gains taxed; long-term preferred"
+    roth_ira:
+      value: 44000
+      type: "Retirement"
+      tax_treatment: "All growth permanently tax-free"
+
+# --------------------------------------------------------------------------
+# TAX-LOCATION RULES
+# --------------------------------------------------------------------------
+tax_location:
+  roth_ira_first:
+    - "individual_stocks_thematic"      # Biotech, AI, Defense, Materials individual names
+    - "high_turnover"                   # Momentum-driven, expected hold < 12 months
+    - "biotech_smallcap"                # Highest volatility and rebalancing frequency
+    - "momentum_tilt_only"              # Flagged as momentum, not fundamental overweight
+    - "thematic_etf"                    # Thematic ETFs (ARKK, BOTZ, etc.) — high turnover
+  taxable:
+    - "broad_etf_longterm"              # Broad ETFs held > 12 months
+    - "geographic_etf"                  # EEM, INDA, EWZ, VGK — foreign tax credit eligible
+    - "cash_short_duration"             # BIL, short-duration fixed income
+    - "energy_materials_etf"            # Lower turnover, structural diversifier
+    - "industry_etf"                    # Sub-sector industry ETFs — moderate turnover
+    - "tax_loss_harvest_candidate"      # Positions with TLH opportunity
+  split_threshold: 10000               # Never split a position across accounts unless > $10k
+
+# --------------------------------------------------------------------------
+# TICKER UNIVERSES
+# --------------------------------------------------------------------------
+tickers:
+  # === CORE SECTOR ETFs (11 GICS sectors) ===
+  sector_etfs:
+    - XLK   # Technology
+    - XLV   # Healthcare
+    - XLE   # Energy
+    - XLF   # Financials
+    - XLI   # Industrials
+    - XLB   # Materials
+    - XLU   # Utilities
+    - XLP   # Consumer Staples
+    - XLRE  # Real Estate
+    - XLC   # Communication Services
+    - XLY   # Consumer Discretionary
+
+  # === INDUSTRY / SUB-SECTOR ETFs (granular bets within sectors) ===
+  industry_etfs:
+    # Technology sub-sectors
+    - SOXX  # Semiconductors (iShares)
+    - IGV   # Software (iShares Expanded Tech-Software)
+    - HACK  # Cybersecurity (ETFMG Prime Cyber Security)
+    - SKYY  # Cloud Computing (First Trust)
+    # Healthcare sub-sectors
+    - XBI   # Biotech (SPDR S&P Biotech — equal-weight)
+    - IHI   # Medical Devices (iShares)
+    - XPH   # Pharmaceuticals (SPDR S&P)
+    # Financials sub-sectors
+    - KBE   # Banks (SPDR S&P Bank)
+    - KRE   # Regional Banks (SPDR S&P)
+    - IAI   # Broker-Dealers & Securities Exchanges (iShares)
+    # Consumer sub-sectors
+    - XHB   # Homebuilders (SPDR S&P)
+    - XRT   # Retail (SPDR S&P — equal-weight)
+    - IBUY  # Online Retail (Amplify)
+    # Industrials sub-sectors
+    - ITA   # Aerospace & Defense (iShares)
+    - IYT   # Transportation (iShares)
+    # Energy sub-sectors
+    - XOP   # Oil & Gas Exploration (SPDR S&P)
+    - OIH   # Oil Services (VanEck)
+    # Real Estate sub-sectors
+    - VNQ   # Vanguard Real Estate (broader than XLRE)
+
+  # === THEMATIC ETFs (cross-sector megatrend exposure) ===
+  thematic_etfs:
+    - BOTZ  # Robotics & AI (Global X)
+    - LIT   # Lithium & Battery Tech (Global X)
+    - ICLN  # Clean Energy (iShares Global)
+    - TAN   # Solar (Invesco)
+    - QCLN  # Clean Edge Green Energy (First Trust)
+    - ARKK  # Disruptive Innovation (ARK)
+    - ARKG  # Genomic Revolution (ARK)
+    - ARKW  # Next Generation Internet (ARK)
+    - SMH   # Semiconductors (VanEck — more concentrated than SOXX)
+    - KOMP  # New Economies Composite (SPDR Kensho)
+    - UFO   # Space (Procure)
+    - DRIV  # Autonomous & EV Technology (Global X)
+    - URNM  # Uranium Mining (Sprott)
+    - URA   # Uranium (Global X)
+    - REMX  # Rare Earth / Strategic Metals (VanEck)
+    - COPX  # Copper Miners (Global X)
+    - AIQ   # AI & Technology (Global X)
+
+  # === GEOGRAPHIC ETFs ===
+  geographic_etfs:
+    - EEM   # Emerging Markets
+    - INDA  # India
+    - EWZ   # Brazil
+    - VGK   # Europe
+    - FXI   # China Large-Cap
+    - EWY   # South Korea
+    - EWT   # Taiwan
+    - EWJ   # Japan
+    - KWEB  # China Internet (KraneShares)
+    - VWO   # Vanguard FTSE Emerging Markets (broader than EEM)
+
+  # === FACTOR ETFs ===
+  factor_etfs:
+    - MTUM  # Momentum
+    - VLUE  # Value
+    - USMV  # Min Volatility
+    - QUAL  # Quality
+    - SIZE  # Size
+    - COWZ  # Cash Flow (Pacer US Cash Cows 100)
+    - QQQM  # Nasdaq 100 (Invesco, lower cost than QQQ)
+
+  # === VOLATILITY / VIX ===
+  volatility:
+    - "^VIX"
+    - "^VIX3M"
+
+  # === BENCHMARKS ===
+  benchmarks:
+    - SPY   # S&P 500
+    - QQQ   # Nasdaq 100
+    - IWM   # Russell 2000
+    - AGG   # Aggregate Bond
+    - GLD   # Gold
+    - TLT   # 20+ Year Treasury
+    - BIL   # 1-3 Month T-Bill
+
+  # ===========================================================================
+  # THEMATIC WATCHLISTS (individual stocks — 3-5% position sizing in Roth)
+  # ===========================================================================
+  # ITCI removed (acquired by J&J Apr 2025, delisted)
+  # PANW removed (market cap ~$120B, exceeds $40B mid-cap threshold)
+
+  watchlist_biotech:
+    - NBIX   # Neurocrine Biosciences — CNS pipeline
+    - EXEL   # Exelixis — oncology
+    - HALO   # Halozyme — drug delivery platform
+    - SRPT   # Sarepta Therapeutics — rare disease / gene therapy
+    - VKTX   # Viking Therapeutics — GLP-1 / obesity (M&A candidate)
+    - GPCR   # Structure Therapeutics — small-molecule GLP-1
+    - TERN   # Terns Pharmaceuticals — oncology (CML)
+    - IONS   # Ionis Pharmaceuticals — RNA-targeted therapies
+    - MRNA   # Moderna — mRNA platform (pipeline beyond COVID)
+    - BMRN   # BioMarin — rare disease
+    - PCVX   # Vaxcyte — vaccines
+    - ALNY   # Alnylam Pharmaceuticals — RNAi therapeutics
+
+  watchlist_ai_software:
+    - CRWD   # CrowdStrike — endpoint security
+    - NET    # Cloudflare — edge computing / security
+    - DDOG   # Datadog — observability
+    - PLTR   # Palantir (validate valuation — extreme premium)
+    - ZS     # Zscaler — zero-trust security
+    - CYBR   # CyberArk — identity security
+    - MDB    # MongoDB — AI-native database
+    - HUBS   # HubSpot — AI-powered CRM
+    - OKTA   # Okta — identity management
+    - DOCN   # DigitalOcean — cloud infra mid-tier
+    - S      # SentinelOne — AI-powered endpoint
+    - FSLY   # Fastly — edge computing
+
+  watchlist_defense:
+    - RTX    # Raytheon Technologies
+    - LMT    # Lockheed Martin
+    - BAESY  # BAE Systems ADR — European NATO
+    - ASML   # Semiconductor Equipment (CHIPS Act)
+    - ROK    # Rockwell Automation — factory automation
+    - RNMBY  # Rheinmetall ADR — European land systems
+    - SAABF  # Saab AB OTC — Swedish defense
+    - KTOS   # Kratos Defense — drones / unmanned systems
+    - AVAV   # AeroVironment — tactical UAS
+    - HWM    # Howmet Aerospace — precision engineering
+    - HII    # Huntington Ingalls — naval shipbuilding
+    - LDOS   # Leidos — defense IT / cyber
+
+  watchlist_green_materials:
+    - ALB    # Albemarle (lithium)
+    - FCX    # Freeport-McMoRan (copper)
+    - SQM    # Sociedad Química (lithium/Chile)
+    - SCCO   # Southern Copper
+    - WPM    # Wheaton Precious Metals (royalty/streaming)
+    - LAC    # Lithium Americas (Thacker Pass)
+    - SGML   # Sigma Lithium (Brazil hard rock)
+    - MP     # MP Materials (rare earths)
+    - VALE   # Vale (nickel/copper/iron)
+    - TECK   # Teck Resources (copper/zinc)
+    - NEM    # Newmont (gold — inflation hedge)
+
+  watchlist_semiconductors:
+    - AVGO   # Broadcom — networking/AI chips
+    - MRVL   # Marvell — data infrastructure
+    - AMAT   # Applied Materials — equipment
+    - LRCX   # Lam Research — equipment
+    - KLAC   # KLA Corp — inspection/metrology
+    - "ON"   # ON Semiconductor — power/auto
+    - MPWR   # Monolithic Power — analog
+    - CRUS   # Cirrus Logic — mixed-signal
+    - RMBS   # Rambus — memory interface
+    - WOLF   # Wolfspeed — SiC power
+
+  watchlist_energy_transition:
+    - ENPH   # Enphase Energy — micro-inverters
+    - SEDG   # SolarEdge — solar inverters
+    - FSLR   # First Solar — utility-scale panels
+    - RUN    # Sunrun — residential solar
+    - PLUG   # Plug Power — hydrogen fuel cells
+    - BWXT   # BWX Technologies — nuclear
+    - LEU    # Centrus Energy — nuclear enrichment
+    - VST    # Vistra Energy — power/nuclear
+    - CEG    # Constellation Energy — nuclear fleet
+    - NNE    # Nano Nuclear Energy — micro-reactors
+
+  watchlist_fintech:
+    - XYZ    # Block (fka Square) — payments/crypto
+    - AFRM   # Affirm — BNPL
+    - SOFI   # SoFi Technologies — digital banking
+    - UPST   # Upstart — AI lending
+    - HOOD   # Robinhood — retail trading
+    - NU     # Nu Holdings — LatAm digital bank
+    - COIN   # Coinbase — crypto exchange
+
+  # Mega-cap exclusion list for AI Software watchlist
+  ai_software_exclude:
+    - NVDA
+    - MSFT
+    - GOOGL
+    - META
+    - AMZN
+    - AAPL
+
+  # Market cap thresholds for watchlist validation
+  watchlist_market_cap:
+    biotech_min_m: 500       # $500M minimum
+    biotech_max_m: 8000      # $8B maximum for pure M&A plays
+    ai_software_min_m: 3000  # $3B minimum
+    ai_software_max_m: 40000 # $40B maximum (mid-cap focus)
+    defense_min_m: 1000      # $1B minimum
+    materials_min_m: 500     # $500M minimum
+    semiconductors_min_m: 2000  # $2B minimum
+    energy_transition_min_m: 500
+    fintech_min_m: 1000
+
+# --------------------------------------------------------------------------
+# FRED MACROECONOMIC SERIES
+# --------------------------------------------------------------------------
+fred:
+  series:
+    federal_funds_rate: "FEDFUNDS"
+    treasury_spread_10y2y: "T10Y2Y"
+    cpi_yoy: "CPIAUCSL"
+    unemployment_rate: "UNRATE"
+    cfnai: "CFNAI"
+    industrial_production: "INDPRO"
+  # FRED API key read from environment variable FRED_API_KEY
+  # Register free at https://fred.stlouisfed.org/docs/api/api_key.html
+
+# --------------------------------------------------------------------------
+# SEC EDGAR SETTINGS
+# --------------------------------------------------------------------------
+sec_edgar:
+  user_agent: "QuantSystemBuilder/1.0 (your_email@domain.com)"
+  rate_limit_sleep: 0.15        # seconds between API calls (10 req/s limit)
+  filing_types:
+    - "10-K"
+    - "8-K"
+  max_filings_per_ticker: 2     # Most recent N filings per ticker (keeps NLP fresh, reduces load)
+  download_retries: 3           # Retry attempts for 503/timeout on document downloads
+  retry_backoff_base: 2         # Exponential backoff base (2s, 4s, 8s)
+  top_holdings_per_etf: 5       # Number of top holdings to pull filings for
+  base_url: "https://data.sec.gov/submissions/"
+  archives_url: "https://www.sec.gov/Archives/edgar/data/"
+
+# --------------------------------------------------------------------------
+# REGIME DETECTION PARAMETERS (Section 2, 8.2)
+# --------------------------------------------------------------------------
+regime:
+  wedge_volume:
+    rolling_window: 63              # Trading days for demeaned log-return vectors
+    percentile_lookback: 252        # Trading days for percentile normalization
+  thresholds:
+    panic_upper: 5                  # Percentile: below this = Panic zone
+    defense_upper: 30               # Percentile: below this = Defense zone
+    panic_probability_anchor: 8     # Probability scoring anchor for Panic
+    offense_probability_anchor: 25  # Probability scoring anchor for Offense
+  confirmation:
+    consecutive_days: 2             # Days required to confirm regime transition
+    whipsaw_buffer: 3               # Percentile floor for Panic confirmation (Section 8.2)
+  fast_shock:
+    vix_rv_ratio_threshold: 1.5    # VIX / 21-day realized vol ratio for Fast Shock
+    rv_window: 21                   # Days for realized volatility calculation
+
+# --------------------------------------------------------------------------
+# FACTOR MODEL PARAMETERS (Section 3)
+# --------------------------------------------------------------------------
+factor_model:
+  rolling_window_months: 36         # Rolling OLS regression window
+  mclean_pontiff_decay: 0.74       # Post-publication decay multiplier
+  momentum:
+    lookback_months: 12
+    skip_months: 1                  # 12-1 month momentum (skip most recent month)
+  valuation:
+    discount_rate: 0.08             # 8% discount rate for implied growth calculation
+    momentum_only_percentile: 75    # Above this = "momentum tilt only"
+    avoid_percentile: 90            # Above this = AVOID label
+    momentum_cap_fraction: 0.50     # Cap at 50% of equal-weight if momentum-only
+
+# --------------------------------------------------------------------------
+# CVaR OPTIMIZATION PARAMETERS (Section 5, 8.1)
+# --------------------------------------------------------------------------
+# AGGRESSIVE PROFILE: 95-100% equity in Offense, 15-30% cash in Defense
+# --------------------------------------------------------------------------
+optimizer:
+  cvar_confidence: 0.95             # 95% CVaR
+  tail_correlation_percentile: 10   # Longin-Solnik: joint returns below 10th percentile
+  max_positions: 15                        # Maximum portfolio positions (FIX: was uncapped → 53 positions)
+  em_weight_reduction_range: [0.20, 0.35]  # Expected EM reduction vs. naive CVaR
+
+  # Regime-conditional allocation bands — AGGRESSIVE GROWTH
+  # The sum of all asset class upper bounds should allow ≥95% equity in Offense.
+  allocation_bands:
+    us_equities:
+      panic: [0.05, 0.15]          # Was [0.00, 0.05] — keep skin in the game
+      defense: [0.20, 0.40]        # Was [0.10, 0.25] — stay more invested
+      offense: [0.55, 0.75]        # Was [0.40, 0.60] — aggressive core
+    intl_developed:
+      panic: [0.00, 0.05]          # Was [0.00, 0.00] — small intl hedge
+      defense: [0.05, 0.15]        # Unchanged
+      offense: [0.15, 0.25]        # Unchanged — intl developed stays moderate
+    em_equities:
+      panic: [0.00, 0.02]          # Was [0.00, 0.00] — tiny EM position OK
+      defense: [0.02, 0.10]        # Was [0.00, 0.08]
+      offense: [0.10, 0.20]        # Was [0.08, 0.15] — more EM upside
+    energy_materials:
+      panic: [0.00, 0.05]          # Unchanged
+      defense: [0.05, 0.15]        # Unchanged
+      offense: [0.10, 0.20]        # Unchanged
+    healthcare:
+      panic: [0.05, 0.15]          # Was [0.05, 0.10] — healthcare as defense
+      defense: [0.10, 0.20]        # Unchanged
+      offense: [0.10, 0.18]        # Unchanged
+    industry_sub:
+      panic: [0.00, 0.00]          # NEW — industry ETFs sit out in Panic
+      defense: [0.00, 0.05]        # NEW — minimal in Defense
+      offense: [0.05, 0.15]        # NEW — tilt to sub-sectors in Offense
+    thematic:
+      panic: [0.00, 0.00]          # NEW — thematics fully off in Panic
+      defense: [0.00, 0.05]        # NEW — tiny thematic in Defense
+      offense: [0.05, 0.15]        # NEW — meaningful thematic in Offense
+    cash_short_duration:
+      panic: [0.50, 0.80]          # Was [0.70, 1.00] — less cash even in Panic
+      defense: [0.15, 0.30]        # Was [0.30, 0.60] — cut cash in Defense
+      offense: [0.00, 0.05]        # Was [0.05, 0.15] — near-zero cash in Offense
+    vix_overlay_notional:
+      panic: [0.00, 0.02]          # Unchanged
+      defense: [0.02, 0.04]        # Unchanged
+      offense: [0.005, 0.015]      # Unchanged
+
+# --------------------------------------------------------------------------
+# VIX OVERLAY PARAMETERS (Section 8.3)
+# --------------------------------------------------------------------------
+vix_overlay:
+  max_annual_roll_drag_pct: 0.40    # 40% of Calmar improvement
+  put_spread_premium_budget:
+    defense: [0.02, 0.04]
+    panic: [0.00, 0.02]
+    offense: [0.005, 0.015]
+
+# --------------------------------------------------------------------------
+# NLP SENTIMENT PARAMETERS (Section 4, 6.2a)
+# --------------------------------------------------------------------------
+nlp:
+  model: "ProsusAI/finbert"
+  max_tokens: 512                   # Strict token limit per filing
+  rolling_sentiment_window: 90      # Days for sentiment trend
+  vix_drift_percentile: 75          # VIX above this = "NLP Regime Drift Risk"
+  regime_weights:
+    offense: 0.20                   # NLP contributes 20% of composite in Offense
+    defense: 0.00                   # Monitoring only
+    panic: 0.00                     # Monitoring only
+
+# --------------------------------------------------------------------------
+# MONITORING & ALERTS (Section 7.2, 9.2)
+# --------------------------------------------------------------------------
+monitor:
+  rebalance_threshold_bps: 200      # Basis points drift to trigger rebalance
+  entry_window_threshold_bps: 300   # Underweight threshold for entry signal
+  extended_defense_days: 60         # Days in Defense/Panic before reassessment (Section 9.2)
+  panic_exit_sequence:
+    immediate_pct: 0.50             # 50% immediate on Panic
+    remainder_days: [3, 5]          # Remainder over 3–5 days
+  run_time_et: "16:30"              # 4:30 PM ET daily
+
+# --------------------------------------------------------------------------
+# DATA QUALITY THRESHOLDS
+# --------------------------------------------------------------------------
+data_quality:
+  stale_sector_etf_limit: 3         # Max stale sector ETFs before suppressing signals
+  backfill_method: "last_valid"     # Use most recent valid close
+
+# --------------------------------------------------------------------------
+# ALERT DELIVERY
+# --------------------------------------------------------------------------
+alerts:
+  telegram:
+    # Bot token from env: TELEGRAM_BOT_TOKEN
+    # Chat ID from env: TELEGRAM_CHAT_ID
+    enabled: true
+  email:
+    # Gmail credentials from env: GMAIL_USERNAME, GMAIL_PASSWORD
+    enabled: true
+  google_sheets:
+    # Service account JSON from env: GOOGLE_SHEETS_CREDENTIALS
+    spreadsheet_name: "Sector Rotation Daily Log"
+    enabled: true
+
+# --------------------------------------------------------------------------
+# BACKTEST PARAMETERS (Section 9)
+# --------------------------------------------------------------------------
+backtest:
+  mclean_pontiff_label: "(in-sample, apply 26% McLean-Pontiff decay to alpha differential for forward estimate)"
+  stress_tests:
+    policy_shock:
+      sp500_drop_threshold: -0.03   # >3% single-day drop
+      wedge_volume_pre_threshold: 15  # No prior deterioration below 15th percentile
+    incomplete_panic:
+      analog_year: 2022
+    extended_bull:
+      duration_years: 10
+      annual_drag_range: [0.005, 0.012]  # 0.5% to 1.2% annual drag
+
+# --------------------------------------------------------------------------
+# SECTION 8.2 — PROBABILISTIC TRIGGER PARAMETERS
+# --------------------------------------------------------------------------
+probabilistic_triggers:
+  regime_persistence_days: 2        # Default confirmation requirement
+  whipsaw_buffer_percentile: 3      # Panic confirmation floor
+  upgrade_path_trigger: 15          # Percentile trigger for regime upgrade path
+
+# --------------------------------------------------------------------------
+# STOCK SCREENER PARAMETERS (Phase 3B)
+# --------------------------------------------------------------------------
+stock_screener:
+  top_holdings_count: 20            # Pull top N holdings from each overweight ETF
+  min_price_history_days: 252       # Minimum trading days needed for scoring
+  watchlist_pos_pct: 0.04           # Each watchlist position = 4% of assigned account (was 2%)
+  scoring_weights:
+    momentum: 0.30                  # 12-1 month momentum rank
+    quality: 0.25                   # ROE + gross margin + OCF yield
+    value: 0.25                     # Forward P/E vs 5yr median
+    size: 0.20                      # Market cap rank (small/mid-cap bonus)
+  valuation_filter:
+    discount_rate: 0.08             # 8% discount rate for implied growth
+    momentum_only_percentile: 75    # Implied growth > 75th = MOMENTUM_ONLY
+    avoid_percentile: 90            # Implied growth > 90th = AVOID
+  entry_signal:
+    min_factor_score_percentile: 75 # Top quartile factor score required
+    require_fundamental_buy: true   # Must pass valuation filter
+    require_offense_regime: true    # Parent sector must be in Offense band
+  exit_signal:
+    momentum_bottom_percentile: 25  # Momentum drops to bottom quartile
+    trigger_on_defense_rotation: true  # Exit when sector rotates to Defense
