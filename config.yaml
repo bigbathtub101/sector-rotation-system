@@ -287,6 +287,9 @@ sec_edgar:
   top_holdings_per_etf: 5       # Number of top holdings to pull filings for
   base_url: "https://data.sec.gov/submissions/"
   archives_url: "https://www.sec.gov/Archives/edgar/data/"
+  efts_search_url: "https://efts.sec.gov/LATEST/search-index"
+  efts_batch_size: 10           # tickers per EFTS query batch
+  use_efts_primary: true        # Use EFTS as primary discovery, submissions as fallback
 
 # --------------------------------------------------------------------------
 # REGIME DETECTION PARAMETERS (Section 2, 8.2)
