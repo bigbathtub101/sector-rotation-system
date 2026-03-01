@@ -721,9 +721,15 @@ def fetch_filings_via_efts(
             logger.error("EFTS query failed for batch %s: %s", batch, e)
             return []  # signal failure so caller can fall back
 
-        hits = data.get("hits", {}).get("hits", [])
+        # The EFTS API returns either a nested dict {"hits": {"hits": [...]}}
+        # or a flat list {"hits": [...]}, depending on the endpoint version.
+        raw_hits = data.get("hits", [])
+        if isinstance(raw_hits, dict):
+            hits = raw_hits.get("hits", [])
+        else:
+            hits = raw_hits
         if not hits:
-            logger.debug("EFTS returned 0 hits for batch %s", batch)
+            logger.warning("EFTS returned 0 hits for batch %s", batch)
             continue
 
         # Count per ticker so we respect max_filings_per_ticker
@@ -855,10 +861,15 @@ def fetch_all_filings(
         logger.info("Using EFTS as primary filing discovery for %d tickers", len(tickers))
         try:
             all_filings = fetch_filings_via_efts(cfg, tickers)
-            if all_filings is not None:
+            if all_filings is not None and len(all_filings) > 0:
                 logger.info("EFTS succeeded: %d filings fetched", len(all_filings))
                 logger.info("Total filings fetched: %d for %d tickers", len(all_filings), len(tickers))
                 return all_filings
+            elif all_filings is not None:
+                logger.warning(
+                    "EFTS returned 0 filings for %d tickers — falling back to per-ticker submissions",
+                    len(tickers),
+                )
         except Exception as e:
             logger.error("EFTS primary path raised an exception: %s — falling back to submissions", e)
 
