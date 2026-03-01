@@ -1,15 +1,33 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
+*.py[cod]
 *.egg-info/
 dist/
 build/
-.env
+
+# SQLite databases
 *.db
-*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Runtime output
+current_allocation.json
+current_allocation.csv
 screener_output.json
-sector_top_picks.csv
-screen_*.csv
 watchlist_*.csv
+screen_*.csv
+alerts.json
+alerts_history.csv
+monitor.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+*.env
+venv/
+.venv/
