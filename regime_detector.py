@@ -80,7 +80,7 @@ def compute_wedge_volume_series(
     Parameters
     ----------
     log_returns : pd.DataFrame
-        Wide-format log returns (date index × sector tickers).
+        Wide-format log returns (date index x sector tickers).
     window : int
         Rolling window for covariance estimation (default: 63 trading days).
 
@@ -233,7 +233,7 @@ def compute_regime_probabilities(
         p_defense = max(0.0, 0.5 * (1.0 - t))
         p_offense = 1.0 - p_defense
     else:
-        # pct >= defense_upper → full Offense
+        # pct >= defense_upper -> full Offense
         # Probability rises with distance above defense_upper
         p_panic = 0.0
         p_defense = 0.0
@@ -407,7 +407,7 @@ def compute_fast_shock_indicator(
 def load_sector_prices(conn: sqlite3.Connection, cfg: dict) -> pd.DataFrame:
     """
     Load sector ETF prices from the database and pivot to wide format
-    (date × ticker with adjusted close values).
+    (date x ticker with adjusted close values).
     """
     sector_tickers = cfg["tickers"]["sector_etfs"]
     placeholders = ",".join(["?"] * len(sector_tickers))
@@ -464,7 +464,7 @@ def compute_daily_regime(
     """
     Master function: compute the full daily regime state.
 
-    1. Load sector prices → compute log returns → compute wedge volume
+    1. Load sector prices -> compute log returns -> compute wedge volume
     2. Percentile-rank the wedge volume
     3. Compute probabilistic regime vector for each day
     4. Apply 2-day confirmation filter
@@ -497,7 +497,7 @@ def compute_daily_regime(
         logger.error("Insufficient sector price data for regime computation.")
         return pd.DataFrame()
 
-    logger.info("Sector prices: %d days × %d sectors", *sector_wide.shape)
+    logger.info("Sector prices: %d days x %d sectors", *sector_wide.shape)
 
     log_returns = compute_log_returns(sector_wide)
     logger.info("Log returns: %d days", len(log_returns))

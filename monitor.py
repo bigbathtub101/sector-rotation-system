@@ -106,29 +106,6 @@ def get_db(db_path: Path = DB_PATH) -> sqlite3.Connection:
             report_text TEXT
         )
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS nlp_scores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            filing_type TEXT,
-            filing_date TEXT,
-            sentiment_score REAL,
-            confidence REAL,
-            regime_weight REAL,
-            scored_at TEXT,
-            raw_text_snippet TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS nlp_sector_signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            sector_etf TEXT NOT NULL,
-            sector_score REAL,
-            drift_risk INTEGER DEFAULT 0,
-            created_at TEXT
-        )
-    """)
     conn.commit()
     return conn
 
@@ -208,15 +185,11 @@ def count_consecutive_defensive_days(conn: sqlite3.Connection) -> int:
 
 def fetch_nlp_sector_signals(conn: sqlite3.Connection) -> pd.DataFrame:
     """Return the latest NLP sector signals."""
-    try:
-        return pd.read_sql_query(
-            "SELECT * FROM nlp_sector_signals "
-            "ORDER BY date DESC LIMIT 11",
-            conn,
-        )
-    except Exception:
-        logger.warning("nlp_sector_signals table not found or query failed — returning empty DataFrame.")
-        return pd.DataFrame()
+    return pd.read_sql_query(
+        "SELECT * FROM nlp_sector_signals "
+        "ORDER BY date DESC LIMIT 11",
+        conn,
+    )
 
 
 def fetch_latest_factor_signals(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -442,21 +415,6 @@ def _default_allocation(cfg: dict, regime: str) -> Dict:
 # 3. ALERT DETECTION
 # ===========================================================================
 
-def _extract_weight(val) -> float:
-    """Extract numeric weight from a value that may be a float or an optimizer position dict.
-
-    Optimizer position dicts have the form:
-        {'pct': 8.8, 'total_dollars': ..., 'taxable_dollars': ..., ...}
-    where 'pct' is the percentage allocation (0–100). This function converts
-    that to a decimal weight (0.0–1.0).
-    """
-    if isinstance(val, dict):
-        return val.get('pct', 0.0) / 100.0
-    if isinstance(val, (int, float)):
-        return float(val)
-    return 0.0
-
-
 class AlertEngine:
     """
     Evaluates all alert conditions against current system state.
@@ -582,8 +540,8 @@ class AlertEngine:
         all_keys = set(prev.keys()) | set(curr.keys())
         max_drift = 0.0
         for k in all_keys:
-            old = _extract_weight(prev.get(k, 0.0))
-            new = _extract_weight(curr.get(k, 0.0))
+            old = prev.get(k, 0.0) or 0.0
+            new = curr.get(k, 0.0) or 0.0
             drift = abs(new - old) * 10000  # to bps
             max_drift = max(max_drift, drift)
         return max_drift
@@ -593,8 +551,8 @@ class AlertEngine:
         now = dt.datetime.now().isoformat()
         alerts = []
         for asset, target_weight in target.items():
-            current = _extract_weight(prev.get(asset, 0.0))
-            target_w = _extract_weight(target_weight)
+            current = prev.get(asset, 0.0) or 0.0
+            target_w = target_weight or 0.0
             if target_w > current:
                 underweight_bps = (target_w - current) * 10000
                 if underweight_bps >= self.entry_window_bps:
