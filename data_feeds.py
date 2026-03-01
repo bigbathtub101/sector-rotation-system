@@ -82,7 +82,9 @@ def init_database(db_path: Path = DB_PATH) -> sqlite3.Connection:
     Create / connect to the SQLite database and ensure all required
     tables exist.  Tables: prices, macro_data, filings, signals, allocations.
     """
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     cur = conn.cursor()
 
     cur.execute("""
