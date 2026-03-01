@@ -11,7 +11,6 @@ Dependencies: yfinance, pandas, requests, pyyaml, fredapi, sqlite3
 """
 
 import os
-import re
 import sys
 import json
 import time
@@ -20,8 +19,6 @@ import sqlite3
 import datetime as dt
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
-
-import concurrent.futures
 
 import yaml
 import pandas as pd
@@ -85,9 +82,7 @@ def init_database(db_path: Path = DB_PATH) -> sqlite3.Connection:
     Create / connect to the SQLite database and ensure all required
     tables exist.  Tables: prices, macro_data, filings, signals, allocations.
     """
-    conn = sqlite3.connect(str(db_path), timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
 
     cur.execute("""
@@ -182,14 +177,9 @@ def _get_all_tickers(cfg: dict) -> List[str]:
     seen = set()
     unique = []
     for t in tickers:
-        if isinstance(t, str) and t not in seen:
+        if t not in seen:
             seen.add(t)
             unique.append(t)
-        elif not isinstance(t, str):
-            logger.warning(
-                "Skipping non-string ticker value: %r (check config.yaml for unquoted YAML booleans like ON/OFF/YES/NO)",
-                t,
-            )
     return unique
 
 
@@ -293,7 +283,7 @@ def fetch_prices(
     col_map = {}
     for c in prices.columns:
         cl = str(c).lower().strip().replace(" ", "_")
-        if cl in ("date", "datetime", "index"):
+        if cl in ("date", "datetime"):
             col_map[c] = "date"
         elif cl in ("adj_close", "adj close", "adjclose", "adjusted_close"):
             col_map[c] = "adj_close"
@@ -498,53 +488,13 @@ def get_sector_etf_top_holdings(
 _CIK_CACHE: Dict[str, str] = {}
 
 
-def _prefetch_cik_cache(cfg: dict) -> None:
-    """Pre-fetch all CIKs from company_tickers.json into _CIK_CACHE in one request."""
-    headers = _sec_headers(cfg)
-    try:
-        url = "https://www.sec.gov/files/company_tickers.json"
-        resp = requests.get(url, headers=headers, timeout=30)
-        _sec_sleep(cfg)
-        resp.raise_for_status()
-        for entry in resp.json().values():
-            t = entry.get("ticker", "").upper()
-            cik = str(entry.get("cik_str", ""))
-            if t:
-                _CIK_CACHE[t] = cik
-        logger.info("CIK cache populated with %d entries", len(_CIK_CACHE))
-    except Exception as e:
-        logger.error("Failed to prefetch CIK cache: %s", e)
-
-
 def _sec_headers(cfg: dict) -> dict:
     """Return compliant SEC User-Agent header."""
-    config_ua = cfg["sec_edgar"]["user_agent"].strip()
-    ua = config_ua
-
+    ua = cfg["sec_edgar"]["user_agent"]
     # Allow override via environment variable
     email = os.environ.get("SEC_EDGAR_EMAIL", "")
     if email:
-        # Strip ALL control characters (anything outside printable ASCII 0x20-0x7E)
-        # Colab Secrets can inject \r\n and other invisible characters
-        email = re.sub(r"[^\x20-\x7E]", "", email).strip()
-        if email:
-            candidate_ua = f"QuantSystemBuilder/1.0 ({email})"
-            # Final validation — strip control chars from the full string too
-            candidate_ua = re.sub(r"[^\x20-\x7E]", "", candidate_ua).strip()
-            if "\r" in candidate_ua or "\n" in candidate_ua or not candidate_ua:
-                logger.warning(
-                    "SEC_EDGAR_EMAIL produced an invalid User-Agent after sanitization "
-                    "(repr=%r) — falling back to config.yaml user_agent", candidate_ua
-                )
-            else:
-                ua = candidate_ua
-        else:
-            logger.warning(
-                "SEC_EDGAR_EMAIL was set but contained only control characters — "
-                "falling back to config.yaml user_agent"
-            )
-
-    logger.debug("SEC User-Agent header value: %r", ua)
+        ua = f"QuantSystemBuilder/1.0 ({email})"
     return {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
 
 
@@ -553,51 +503,7 @@ def _sec_sleep(cfg: dict):
     time.sleep(cfg["sec_edgar"]["rate_limit_sleep"])
 
 
-def _download_filing_text(
-    filing_url: str,
-    accession: str,
-    ticker: str,
-    cfg: dict,
-) -> str:
-    """
-    Download the text of a single SEC filing document.
-
-    Uses a reduced timeout (``doc_download_timeout``) and makes up to 2 attempts
-    (1 retry) to avoid hanging. Returns empty string on failure so callers can
-    store metadata-only records.
-    """
-    headers = _sec_headers(cfg)
-    timeout = cfg["sec_edgar"].get("doc_download_timeout", 20)
-    raw_text = ""
-    for attempt in range(2):
-        try:
-            doc_resp = requests.get(filing_url, headers=headers, timeout=timeout)
-            _sec_sleep(cfg)
-            if doc_resp.status_code == 200:
-                raw_text = doc_resp.text[:100_000]
-                break
-            elif doc_resp.status_code == 503:
-                wait = 2 ** attempt
-                logger.warning(
-                    "503 fetching filing %s for %s (attempt %d/2) — retrying in %ds",
-                    accession, ticker, attempt + 1, wait,
-                )
-                time.sleep(wait)
-            else:
-                logger.warning(
-                    "Non-200 status (%d) fetching filing %s for %s",
-                    doc_resp.status_code, accession, ticker,
-                )
-                break
-        except Exception as e:
-            logger.error("Failed to download filing %s for %s: %s", accession, ticker, e)
-            break
-    else:
-        logger.warning("All retries exhausted for filing %s for %s", accession, ticker)
-    return raw_text
-
-
-
+def lookup_cik(ticker: str, cfg: dict) -> Optional[str]:
     """
     Look up a company's CIK number from SEC EDGAR company tickers JSON.
     """
@@ -629,13 +535,11 @@ def fetch_filings_for_ticker(
     cfg: dict,
     filing_types: List[str] = None,
     max_filings: int = 5,
-    deadline: float = None,
 ) -> List[dict]:
     """
     Fetch recent filings for a single ticker from SEC EDGAR.
 
     Returns a list of dicts with filing metadata and raw text.
-    The ``deadline`` (from ``time.monotonic()``) caps total time spent here.
     """
     if filing_types is None:
         filing_types = cfg["sec_edgar"]["filing_types"]
@@ -671,9 +575,6 @@ def fetch_filings_for_ticker(
     for i, form in enumerate(forms):
         if count >= max_filings:
             break
-        if deadline is not None and time.monotonic() > deadline:
-            logger.info("Time budget exhausted mid-ticker for %s — stopping", ticker)
-            break
         if form not in filing_types:
             continue
 
@@ -687,7 +588,21 @@ def fetch_filings_for_ticker(
             f"{cik}/{accession_path}/{primary_doc}"
         )
 
-        raw_text = _download_filing_text(filing_url, accession, ticker, cfg)
+        # Attempt to download filing text
+        raw_text = ""
+        try:
+            doc_resp = requests.get(filing_url, headers=headers, timeout=60)
+            _sec_sleep(cfg)
+            if doc_resp.status_code == 200:
+                # Take first 100KB to avoid memory issues
+                raw_text = doc_resp.text[:100_000]
+            else:
+                logger.warning(
+                    "Non-200 status (%d) fetching filing %s for %s",
+                    doc_resp.status_code, accession, ticker,
+                )
+        except Exception as e:
+            logger.error("Failed to download filing %s for %s: %s", accession, ticker, e)
 
         results.append({
             "cik": cik,
@@ -707,162 +622,6 @@ def fetch_filings_for_ticker(
     return results
 
 
-def fetch_filings_via_efts(
-    cfg: dict,
-    tickers: List[str],
-    filing_types: List[str] = None,
-    max_filings_per_ticker: int = 5,
-    cik_to_ticker: Dict[str, str] = None,
-    deadline: float = None,
-) -> List[dict]:
-    """
-    Fetch filing metadata for a list of tickers using the SEC EFTS full-text
-    search API (https://efts.sec.gov/LATEST/search-index).
-
-    This is faster than hitting /submissions/ per-ticker because it can
-    discover filings for many tickers in batched queries.
-
-    Uses CIK-based matching (via ``cik_to_ticker``) when provided, which is
-    much more reliable than matching ticker symbols inside entity names.
-
-    Phase 1 collects metadata for all batches; Phase 2 downloads filing text
-    concurrently via ThreadPoolExecutor.
-
-    Returns a list of filing dicts (same schema as fetch_filings_for_ticker),
-    with raw_text populated by a subsequent download from the Archives URL.
-    """
-    if filing_types is None:
-        filing_types = cfg["sec_edgar"]["filing_types"]
-
-    efts_url = cfg["sec_edgar"].get(
-        "efts_search_url", "https://efts.sec.gov/LATEST/search-index"
-    )
-    batch_size = cfg["sec_edgar"].get("efts_batch_size", 10)
-    max_workers = cfg["sec_edgar"].get("max_concurrent_downloads", 5)
-    headers = _sec_headers(cfg)
-    archives_url = cfg["sec_edgar"]["archives_url"]
-
-    # Phase 1: collect filing metadata (no text downloads yet)
-    metadata: List[dict] = []
-    ticker_counts: Dict[str, int] = {}
-    tickers_set = set(t.upper() for t in tickers)
-
-    for batch_start in range(0, len(tickers), batch_size):
-        if deadline is not None and time.monotonic() > deadline:
-            logger.info("Time budget exhausted in EFTS metadata collection — stopping early")
-            break
-
-        batch = tickers[batch_start:batch_start + batch_size]
-        # Build quoted ticker query  e.g. "NVDA" OR "AAPL"
-        q_terms = " OR ".join(f'"{t}"' for t in batch)
-        forms_param = ",".join(filing_types)
-
-        params = {
-            "q": q_terms,
-            "forms": forms_param,
-            "dateRange": "custom",
-            "startdt": (
-                dt.date.today() - dt.timedelta(days=365 * 3)
-            ).isoformat(),
-            "enddt": dt.date.today().isoformat(),
-        }
-
-        try:
-            resp = requests.get(efts_url, params=params, headers=headers, timeout=30)
-            _sec_sleep(cfg)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error("EFTS query failed for batch %s: %s", batch, e)
-            return []  # signal failure so caller can fall back
-
-        # The EFTS API returns either a nested dict {"hits": {"hits": [...]}}
-        # or a flat list {"hits": [...]}, depending on the endpoint version.
-        raw_hits = data.get("hits", [])
-        if isinstance(raw_hits, dict):
-            hits = raw_hits.get("hits", [])
-        else:
-            hits = raw_hits
-        if not hits:
-            logger.warning("EFTS returned 0 hits for batch %s", batch)
-            continue
-
-        for hit in hits:
-            src = hit.get("_source", {})
-            form_type = src.get("form_type", "")
-            if form_type not in filing_types:
-                continue
-
-            cik = src.get("entity_id", "")
-            entity_name = src.get("entity_name", "")
-
-            accession_raw = src.get("file_num", "") or src.get("accession_no", "")
-            # EFTS stores accession as "0001234567-24-000001"
-            accession = accession_raw.replace("-", "") if accession_raw else ""
-            filing_date = src.get("period_of_report", "") or src.get("file_date", "")
-
-            # Build the archives URL from CIK + accession
-            # CIK in EFTS is zero-padded 10-digit
-            cik_str = str(cik).lstrip("0") if cik else ""
-            if not cik_str or not accession:
-                continue
-
-            filing_url = f"{archives_url}{cik_str}/{accession}/"
-
-            # Match the hit back to one of the tickers we queried.
-            # Prefer CIK-based matching (reliable) over entity-name matching (fragile).
-            matched_ticker = ""
-            if cik_to_ticker:
-                candidate = cik_to_ticker.get(cik_str, "")
-                if candidate and candidate.upper() in tickers_set:
-                    matched_ticker = candidate
-            if not matched_ticker:
-                # Fallback: entity-name substring match (original behaviour)
-                for t in batch:
-                    if t.upper() in entity_name.upper():
-                        matched_ticker = t
-                        break
-            if not matched_ticker:
-                continue
-
-            if ticker_counts.get(matched_ticker, 0) >= max_filings_per_ticker:
-                continue
-
-            metadata.append({
-                "cik": cik_str,
-                "ticker": matched_ticker,
-                "company_name": entity_name,
-                "filing_type": form_type,
-                "filing_date": filing_date,
-                "accession_number": accession_raw,
-                "primary_document": src.get("file_num", ""),
-                "filing_url": filing_url,
-                "raw_text": "",
-                "fetched_at": dt.datetime.utcnow().isoformat(),
-            })
-            ticker_counts[matched_ticker] = ticker_counts.get(matched_ticker, 0) + 1
-
-    logger.info(
-        "EFTS metadata: %d filings for %d tickers — downloading text with %d workers",
-        len(metadata), len(tickers), max_workers,
-    )
-
-    # Phase 2: download filing text concurrently
-    def _dl(item: dict) -> dict:
-        if deadline is not None and time.monotonic() > deadline:
-            return item  # skip download — return metadata-only record
-        item["raw_text"] = _download_filing_text(
-            item["filing_url"], item["accession_number"], item["ticker"], cfg
-        )
-        return item
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        all_filings = list(executor.map(_dl, metadata))
-
-    logger.info("EFTS: fetched %d filings for %d tickers", len(all_filings), len(tickers))
-    return all_filings
-
-
 def fetch_all_filings(
     cfg: dict,
     tickers: List[str] = None,
@@ -873,13 +632,6 @@ def fetch_all_filings(
 
     If no tickers are provided, dynamically resolves top holdings
     per sector ETF via yfinance, then adds all watchlist tickers.
-
-    Primary path: EFTS full-text search API (faster, batch queries).
-    Fallback: per-ticker /submissions/ endpoint (original approach).
-
-    A global time budget (``sec_edgar.max_fetch_time_seconds``, default 300 s)
-    caps total wall-clock time so the process never hangs indefinitely.
-    Partial results are returned when the budget is exhausted.
     """
     if tickers is None:
         tickers = []
@@ -902,53 +654,10 @@ def fetch_all_filings(
     # Deduplicate while preserving order
     tickers = list(dict.fromkeys(tickers))
 
-    # Global time budget
-    max_time = cfg["sec_edgar"].get("max_fetch_time_seconds", 300)
-    deadline = time.monotonic() + max_time
-
-    # Pre-fetch CIK map once so EFTS can use CIK-based matching
-    if not _CIK_CACHE:
-        _prefetch_cik_cache(cfg)
-    cik_to_ticker = {v: k for k, v in _CIK_CACHE.items() if v}
-
-    use_efts = cfg["sec_edgar"].get("use_efts_primary", True)
-
-    if use_efts:
-        logger.info("Using EFTS as primary filing discovery for %d tickers", len(tickers))
-        try:
-            all_filings = fetch_filings_via_efts(
-                cfg, tickers, cik_to_ticker=cik_to_ticker, deadline=deadline
-            )
-            if all_filings is not None and len(all_filings) > 0:
-                logger.info("EFTS succeeded: %d filings fetched", len(all_filings))
-                logger.info("Total filings fetched: %d for %d tickers", len(all_filings), len(tickers))
-                return all_filings
-            elif all_filings is not None:
-                logger.warning(
-                    "EFTS returned 0 filings for %d tickers — falling back to per-ticker submissions",
-                    len(tickers),
-                )
-        except Exception as e:
-            logger.error("EFTS primary path raised an exception: %s — falling back to submissions", e)
-
-    # Fallback: per-ticker submissions approach
-    logger.info("Using per-ticker submissions fallback for %d tickers", len(tickers))
     all_filings = []
-    for i, ticker in enumerate(tickers):
-        if time.monotonic() > deadline:
-            logger.warning(
-                "Time budget exhausted after %d/%d tickers — returning %d partial filings",
-                i, len(tickers), len(all_filings),
-            )
-            break
-        filings = fetch_filings_for_ticker(ticker, cfg, deadline=deadline)
+    for ticker in tickers:
+        filings = fetch_filings_for_ticker(ticker, cfg)
         all_filings.extend(filings)
-        if (i + 1) % 10 == 0:
-            elapsed = time.monotonic() - (deadline - max_time)
-            logger.info(
-                "Per-ticker fallback: %d/%d tickers done, %d filings so far, %.0fs elapsed",
-                i + 1, len(tickers), len(all_filings), elapsed,
-            )
 
     logger.info("Total filings fetched: %d for %d tickers", len(all_filings), len(tickers))
     return all_filings
@@ -974,15 +683,6 @@ def validate_prices(prices: pd.DataFrame, cfg: dict) -> Tuple[pd.DataFrame, List
         return prices, warnings
 
     prices = prices.copy()
-    # Drop rows with null dates before any processing to avoid downstream errors
-    null_date_count = prices["date"].isna().sum()
-    if null_date_count:
-        logger.warning("Dropping %d rows with null date in validate_prices()", null_date_count)
-        prices = prices.dropna(subset=["date"])
-    if prices.empty:
-        warnings.append("DATA_QUALITY_WARNING: No price data available after dropping null-date rows.")
-        return prices, warnings
-
     prices["stale_price"] = 0
 
     # Identify the most recent trading date in the data
@@ -1079,13 +779,6 @@ def store_prices(conn: sqlite3.Connection, prices: pd.DataFrame):
         return
     now = dt.datetime.utcnow().isoformat()
     prices = prices.copy()
-    # Drop rows with null dates to avoid NOT NULL constraint violations
-    null_date_count = prices["date"].isna().sum()
-    if null_date_count:
-        logger.warning("Dropping %d rows with null date before store_prices()", null_date_count)
-        prices = prices.dropna(subset=["date"])
-    if prices.empty:
-        return
     prices["fetched_at"] = now
 
     rows = prices[

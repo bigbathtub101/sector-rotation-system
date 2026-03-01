@@ -232,7 +232,7 @@ tickers:
     - NNE    # Nano Nuclear Energy — micro-reactors
 
   watchlist_fintech:
-    - XYZ    # Block (formerly Square) — payments/crypto
+    - XYZ    # Block (fka Square) — payments/crypto
     - AFRM   # Affirm — BNPL
     - SOFI   # SoFi Technologies — digital banking
     - UPST   # Upstart — AI lending
@@ -279,20 +279,14 @@ fred:
 # SEC EDGAR SETTINGS
 # --------------------------------------------------------------------------
 sec_edgar:
-  user_agent: "QuantSystemBuilder/1.0 (gabop98@gmail.com)"
-  rate_limit_sleep: 0.25        # seconds between API calls (10 req/s limit)
+  user_agent: "QuantSystemBuilder/1.0 (your_email@domain.com)"
+  rate_limit_sleep: 0.15        # seconds between API calls (10 req/s limit)
   filing_types:
     - "10-K"
     - "8-K"
   top_holdings_per_etf: 5       # Number of top holdings to pull filings for
   base_url: "https://data.sec.gov/submissions/"
   archives_url: "https://www.sec.gov/Archives/edgar/data/"
-  efts_search_url: "https://efts.sec.gov/LATEST/search-index"
-  efts_batch_size: 10           # tickers per EFTS query batch
-  use_efts_primary: true        # Use EFTS as primary discovery, submissions as fallback
-  max_fetch_time_seconds: 300   # Global time budget for all filings (5 min)
-  max_concurrent_downloads: 5   # Parallel document text downloads
-  doc_download_timeout: 20      # Per-document download timeout (seconds)
 
 # --------------------------------------------------------------------------
 # REGIME DETECTION PARAMETERS (Section 2, 8.2)
@@ -466,8 +460,6 @@ stock_screener:
   top_holdings_count: 20            # Pull top N holdings from each overweight ETF
   min_price_history_days: 252       # Minimum trading days needed for scoring
   watchlist_pos_pct: 0.04           # Each watchlist position = 4% of assigned account (was 2%)
-  screen_all_sectors: true          # Screen all 11 GICS sectors, not just overweight
-  sector_top_picks_count: 20        # Number of top stocks to surface from winning sectors
   scoring_weights:
     momentum: 0.30                  # 12-1 month momentum rank
     quality: 0.25                   # ROE + gross margin + OCF yield
