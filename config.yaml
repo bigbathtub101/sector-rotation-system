@@ -460,6 +460,8 @@ stock_screener:
   top_holdings_count: 20            # Pull top N holdings from each overweight ETF
   min_price_history_days: 252       # Minimum trading days needed for scoring
   watchlist_pos_pct: 0.04           # Each watchlist position = 4% of assigned account (was 2%)
+  screen_all_sectors: true          # Screen all 11 GICS sectors, not just overweight
+  sector_top_picks_count: 20        # Number of top stocks to surface from winning sectors
   scoring_weights:
     momentum: 0.30                  # 12-1 month momentum rank
     quality: 0.25                   # ROE + gross margin + OCF yield
