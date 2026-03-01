@@ -530,11 +530,70 @@ def lookup_cik(ticker: str, cfg: dict) -> Optional[str]:
         return None
 
 
+def _download_filing_text(
+    url: str, headers: dict, cfg: dict, accession: str, ticker: str,
+) -> str:
+    """
+    Download filing document text with retry + exponential backoff.
+    Returns raw text (first 100KB) or empty string on failure.
+    """
+    max_retries = cfg["sec_edgar"].get("download_retries", 3)
+    backoff_base = cfg["sec_edgar"].get("retry_backoff_base", 2)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            doc_resp = requests.get(url, headers=headers, timeout=60)
+            _sec_sleep(cfg)
+
+            if doc_resp.status_code == 200:
+                return doc_resp.text[:100_000]
+
+            if doc_resp.status_code in (503, 429):
+                wait = backoff_base ** attempt
+                if attempt < max_retries:
+                    logger.info(
+                        "Retry %d/%d for %s (%s) — %d status, waiting %ds",
+                        attempt, max_retries, accession, ticker,
+                        doc_resp.status_code, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                else:
+                    logger.warning(
+                        "Giving up on filing %s for %s after %d retries (status %d)",
+                        accession, ticker, max_retries, doc_resp.status_code,
+                    )
+                    return ""
+            else:
+                logger.warning(
+                    "Non-200 status (%d) fetching filing %s for %s",
+                    doc_resp.status_code, accession, ticker,
+                )
+                return ""
+
+        except Exception as e:
+            wait = backoff_base ** attempt
+            if attempt < max_retries:
+                logger.info(
+                    "Retry %d/%d for %s (%s) — %s, waiting %ds",
+                    attempt, max_retries, accession, ticker, e, wait,
+                )
+                time.sleep(wait)
+            else:
+                logger.error(
+                    "Failed to download filing %s for %s after %d retries: %s",
+                    accession, ticker, max_retries, e,
+                )
+                return ""
+
+    return ""
+
+
 def fetch_filings_for_ticker(
     ticker: str,
     cfg: dict,
     filing_types: List[str] = None,
-    max_filings: int = 5,
+    max_filings: int = None,
 ) -> List[dict]:
     """
     Fetch recent filings for a single ticker from SEC EDGAR.
@@ -543,6 +602,8 @@ def fetch_filings_for_ticker(
     """
     if filing_types is None:
         filing_types = cfg["sec_edgar"]["filing_types"]
+    if max_filings is None:
+        max_filings = cfg["sec_edgar"].get("max_filings_per_ticker", 2)
 
     cik = lookup_cik(ticker, cfg)
     if not cik:
@@ -588,21 +649,10 @@ def fetch_filings_for_ticker(
             f"{cik}/{accession_path}/{primary_doc}"
         )
 
-        # Attempt to download filing text
-        raw_text = ""
-        try:
-            doc_resp = requests.get(filing_url, headers=headers, timeout=60)
-            _sec_sleep(cfg)
-            if doc_resp.status_code == 200:
-                # Take first 100KB to avoid memory issues
-                raw_text = doc_resp.text[:100_000]
-            else:
-                logger.warning(
-                    "Non-200 status (%d) fetching filing %s for %s",
-                    doc_resp.status_code, accession, ticker,
-                )
-        except Exception as e:
-            logger.error("Failed to download filing %s for %s: %s", accession, ticker, e)
+        # Download filing text with retry logic
+        raw_text = _download_filing_text(
+            filing_url, headers, cfg, accession, ticker,
+        )
 
         results.append({
             "cik": cik,
@@ -654,8 +704,16 @@ def fetch_all_filings(
     # Deduplicate while preserving order
     tickers = list(dict.fromkeys(tickers))
 
+    total = len(tickers)
+    max_per = cfg["sec_edgar"].get("max_filings_per_ticker", 2)
+    logger.info(
+        "\n📄 SEC FILING FETCH: %d tickers × up to %d filings each = %d max documents",
+        total, max_per, total * max_per,
+    )
+
     all_filings = []
-    for ticker in tickers:
+    for idx, ticker in enumerate(tickers, 1):
+        logger.info("[%d/%d] Fetching filings for %s ...", idx, total, ticker)
         filings = fetch_filings_for_ticker(ticker, cfg)
         all_filings.extend(filings)
 
