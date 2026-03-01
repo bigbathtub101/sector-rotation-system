@@ -794,8 +794,13 @@ def apply_us_subsector_allocation(
     returns: pd.DataFrame = None,
 ) -> Dict[str, dict]:
     """
-    Allocate within US Equities using DeMiguel equal-weight
-    with valuation filter and Bivector Beta adjustments.
+    Allocate within US Equities using factor-score proportional tilting
+    (FIX A: replaces DeMiguel equal-weight).
+
+    Each US sector ETF's share of us_equity_weight is proportional to its
+    composite_score, with valuation filter overrides (MOMENTUM_ONLY gets
+    50% cap, AVOID gets 0).  Bivector Beta still boosts structural
+    diversifiers (XLE, XLB).
 
     Returns dict of ticker -> {weight, label, bivector_beta, ...}
     """
@@ -804,32 +809,33 @@ def apply_us_subsector_allocation(
     if n == 0:
         return {}
 
-    equal_weight = us_equity_weight / n
+    equal_weight = us_equity_weight / n   # kept as reference / floor
     val_cfg = cfg["factor_model"]["valuation"]
     mom_cap = val_cfg["momentum_cap_fraction"]  # 0.50
 
-    result = {}
     energy_materials = ["XLE", "XLB"]
+
+    # --- Pass 1: collect composite scores and labels ---
+    raw_scores: Dict[str, float] = {}
+    labels: Dict[str, str] = {}
+    bv_betas: Dict[str, float] = {}
 
     for ticker in us_sectors:
         row = factor_scores[factor_scores["ticker"] == ticker]
         label = "FUNDAMENTAL_BUY"
-        weight = equal_weight
+        score = 0.5   # neutral default
 
         if not row.empty:
-            score = row["composite_score"].values[0]
-            mom = row["momentum_rank"].values[0]
+            score = float(row["composite_score"].values[0])
+            mom   = float(row["momentum_rank"].values[0])
+            alpha = float(row["adjusted_alpha"].values[0])
 
-            alpha = row["adjusted_alpha"].values[0]
             if mom > 0.75 and alpha < 0:
                 label = "MOMENTUM_ONLY"
-                weight = equal_weight * mom_cap
             elif mom < 0.10 and alpha < -0.05:
                 label = "AVOID"
-                weight = 0.0
-        else:
-            score = 0.5
 
+        # Bivector Beta for energy/materials structural diversifiers
         bv_beta = 1.0
         if ticker in energy_materials and returns is not None:
             sector_only_cols = [c for c in sector_etfs if c in returns.columns]
@@ -839,22 +845,154 @@ def apply_us_subsector_allocation(
                     market_tickers=[c for c in sector_only_cols if c != ticker],
                 )
 
+        raw_scores[ticker] = max(score, 0.01)  # floor prevents zero-div
+        labels[ticker] = label
+        bv_betas[ticker] = bv_beta
+
+    # --- Pass 2: compute proportional weights ---
+    # Shift scores so the minimum maps to a small positive base
+    # (prevents total starvation of lower-scored sectors)
+    min_score = min(raw_scores.values())
+    shifted = {t: (s - min_score + 0.10) for t, s in raw_scores.items()}
+
+    # Apply label overrides before normalizing
+    for ticker in us_sectors:
+        if labels[ticker] == "AVOID":
+            shifted[ticker] = 0.0
+        elif labels[ticker] == "MOMENTUM_ONLY":
+            shifted[ticker] *= mom_cap   # halve its contribution
+
+    total_shifted = sum(shifted.values())
+    if total_shifted <= 0:
+        # Fallback: equal-weight the non-AVOID tickers
+        active = [t for t in us_sectors if labels[t] != "AVOID"]
+        total_shifted = len(active) or 1
+        shifted = {t: (1.0 if t in active else 0.0) for t in us_sectors}
+        total_shifted = sum(shifted.values()) or 1.0
+
+    result = {}
+    for ticker in us_sectors:
+        prop_weight = (shifted[ticker] / total_shifted) * us_equity_weight
+
         result[ticker] = {
-            "weight": round(weight, 6),
-            "label": label,
+            "weight": round(prop_weight, 6),
+            "label": labels[ticker],
+            "composite_score": round(raw_scores[ticker], 4),
             "equal_weight_base": round(equal_weight, 6),
-            "bivector_beta": bv_beta,
-            "is_structural_diversifier": bv_beta > 1.0 and ticker in energy_materials,
+            "bivector_beta": bv_betas[ticker],
+            "is_structural_diversifier": bv_betas[ticker] > 1.0 and ticker in energy_materials,
         }
 
-    # Normalize so weights sum to us_equity_weight
+    # Normalize so weights sum exactly to us_equity_weight
     total = sum(v["weight"] for v in result.values())
     if total > 0:
         scale = us_equity_weight / total
         for t in result:
             result[t]["weight"] = round(result[t]["weight"] * scale, 6)
 
+    logger.info("US sub-sector allocation (factor-tilted): %s",
+                {t: f"{v['weight']:.4f} ({v['label']})" for t, v in result.items() if v['weight'] > 0})
     return result
+
+
+# ===========================================================================
+# 4B. SCREENER INTEGRATION (FIX B)
+# ===========================================================================
+
+def _inject_screener_picks(
+    weights: Dict[str, float],
+    cfg: dict,
+    regime: str,
+) -> Dict[str, float]:
+    """
+    FIX B: Feed stock_screener ENTRY signals into the portfolio.
+
+    Reads screener_output.json (produced by stock_screener.py) and
+    injects ENTRY-signaled tickers as real positions.  Weight for each
+    injected stock is `watchlist_pos_pct` from config (default 4%),
+    carved from the parent asset-class allocation.
+
+    Only injects when regime == 'offense' and the screener has run
+    at least once.  Skips tickers already in weights.
+    """
+    if regime != "offense":
+        logger.info("Screener picks only injected in Offense regime — skipping (regime=%s)", regime)
+        return weights
+
+    screener_path = Path(__file__).parent / "screener_output.json"
+    if not screener_path.exists():
+        logger.info("No screener_output.json found — skipping screener injection")
+        return weights
+
+    try:
+        with open(screener_path) as f:
+            screener = json.load(f)
+    except Exception as e:
+        logger.warning("Failed to read screener_output.json: %s", e)
+        return weights
+
+    signals = screener.get("signals", {})
+    entries = signals.get("entry", [])
+    if not entries:
+        logger.info("No ENTRY signals from screener — no stock picks to inject")
+        return weights
+
+    pos_pct = cfg.get("stock_screener", {}).get("watchlist_pos_pct", 0.04)
+    max_injections = cfg.get("optimizer", {}).get("max_screener_picks", 5)
+
+    # Sort by composite_score descending, take top N
+    entries.sort(key=lambda x: x.get("composite_score", 0), reverse=True)
+    entries = entries[:max_injections]
+
+    injected = 0
+    for entry in entries:
+        ticker = entry.get("ticker", "")
+        if not ticker or ticker in weights:
+            continue
+
+        # Determine which asset class to carve from
+        watchlist = entry.get("watchlist", "")
+        # Map watchlist to parent asset class
+        wl_to_ac = {
+            "biotech": "healthcare",
+            "ai_software": "us_equities",
+            "defense": "us_equities",
+            "green_materials": "energy_materials",
+            "semiconductors": "us_equities",
+            "energy_transition": "energy_materials",
+            "fintech": "us_equities",
+        }
+        parent_ac = wl_to_ac.get(watchlist, "us_equities")
+
+        # Find tickers in that asset class and carve weight proportionally
+        ac_tickers = [t for t, w in weights.items() if _get_asset_class(t) == parent_ac and w > 0]
+        if not ac_tickers:
+            # Carve from the largest position overall
+            ac_tickers = sorted(weights.keys(), key=lambda t: weights[t], reverse=True)[:3]
+
+        carve_total = pos_pct
+        carve_per = carve_total / max(len(ac_tickers), 1)
+
+        for ac_t in ac_tickers:
+            weights[ac_t] = max(0.0, weights[ac_t] - carve_per)
+
+        weights[ticker] = pos_pct
+        # Register in ASSET_CLASS_MAP for downstream processing
+        if ticker not in ASSET_CLASS_MAP:
+            ASSET_CLASS_MAP[ticker] = parent_ac
+
+        injected += 1
+        logger.info("Injected screener pick: %s (%.1f%% from %s, watchlist=%s)",
+                    ticker, pos_pct * 100, parent_ac, watchlist)
+
+    if injected > 0:
+        # Re-normalize to 1.0
+        total = sum(weights.values())
+        if total > 0:
+            weights = {t: w / total for t, w in weights.items()}
+        logger.info("Injected %d screener picks into portfolio", injected)
+
+    return weights
 
 
 # ===========================================================================
@@ -867,47 +1005,88 @@ def _concentrate_portfolio(
     factor_scores: pd.DataFrame = None,
 ) -> Dict[str, float]:
     """
-    FIX 5: Reduce position count for a $144K portfolio.
-
-    For a portfolio this size, 53 positions averaging $2,700 each makes no
-    practical sense — commissions, tracking, and rebalancing overhead dominate.
+    FIX 5 + FIX C: Reduce position count for a $144K portfolio,
+    with reserved slots per asset class so that industry/thematic/
+    screener picks are not wiped out by the 2% floor.
 
     Strategy:
-      - Keep all positions above 2% weight (meaningful allocation)
-      - For remaining slots, pick top-scored tickers
-      - Redistribute weight from dropped positions to survivors proportionally
+      1. Reserve at least 1 slot each for industry_sub, thematic,
+         and individual stocks (screener picks) if any exist
+      2. Keep all positions >= 2% weight (meaningful allocation)
+      3. Within reserved asset classes, keep the top-scored ticker
+         even if below 2%
+      4. Fill remaining slots with top-scored optionals
+      5. Redistribute weight from dropped positions proportionally
     """
     if len(weights) <= max_positions:
         return weights
 
-    # Separate mandatory (>= 2% weight) from optional
-    mandatory = {}
-    optional = []
+    # Classify positions by asset class
+    RESERVED_CLASSES = {"industry_sub", "thematic"}
+    # Screener-injected individual stocks won't be in the original
+    # ASSET_CLASS_MAP, so anything not in the map is treated as an
+    # individual stock pick (also reserved)
+    INDIVIDUAL_SENTINEL = "__individual__"
+
+    per_class: Dict[str, list] = {}   # ac -> [(ticker, weight, fscore)]
     for ticker, w in weights.items():
-        if w >= 0.02:
-            mandatory[ticker] = w
-        else:
-            optional.append((ticker, w))
+        if w <= 0:
+            continue
+        ac = _get_asset_class(ticker)
+        # Check if this is an individual stock (not an ETF in our universe)
+        if ac == "us_equities" and ticker not in {
+            "XLK", "XLV", "XLE", "XLF", "XLI", "XLB", "XLU", "XLP",
+            "XLRE", "XLC", "XLY", "SPY", "QQQ", "IWM",
+            "MTUM", "VLUE", "USMV", "QUAL", "SIZE", "COWZ", "QQQM",
+        }:
+            # Could be a screener pick — mark as individual
+            ac = INDIVIDUAL_SENTINEL
 
-    # How many optional slots remain?
-    remaining_slots = max(0, max_positions - len(mandatory))
-
-    # Score optional tickers
-    scored_optional = []
-    for ticker, w in optional:
         fscore = 0.5
         if factor_scores is not None and not factor_scores.empty:
             match = factor_scores[factor_scores["ticker"] == ticker]
             if not match.empty:
                 fscore = match["composite_score"].values[0]
-        scored_optional.append((ticker, w, fscore))
 
-    # Sort by factor score descending, keep top remaining_slots
-    scored_optional.sort(key=lambda x: x[2], reverse=True)
-    kept_optional = {t: w for t, w, _ in scored_optional[:remaining_slots]}
+        per_class.setdefault(ac, []).append((ticker, w, fscore))
 
-    # Merge
-    final = {**mandatory, **kept_optional}
+    # Sort each class by factor score descending
+    for ac in per_class:
+        per_class[ac].sort(key=lambda x: x[2], reverse=True)
+
+    # --- Pass 1: Mandatory picks (>= 2% weight) ---
+    mandatory = {}
+    for ac, items in per_class.items():
+        for ticker, w, fs in items:
+            if w >= 0.02:
+                mandatory[ticker] = w
+
+    # --- Pass 2: Reserved best-of-class picks ---
+    reserved = {}
+    reserved_acs = RESERVED_CLASSES | {INDIVIDUAL_SENTINEL}
+    for ac in reserved_acs:
+        items = per_class.get(ac, [])
+        if items:
+            # Keep the top-scored ticker from this class even if < 2%
+            best_t, best_w, best_fs = items[0]
+            if best_t not in mandatory:
+                reserved[best_t] = best_w
+
+    # --- Pass 3: Fill remaining slots from optional pool ---
+    used = set(mandatory.keys()) | set(reserved.keys())
+    remaining_slots = max(0, max_positions - len(used))
+
+    optional = []
+    for ac, items in per_class.items():
+        for ticker, w, fs in items:
+            if ticker not in used and w > 0:
+                optional.append((ticker, w, fs))
+
+    optional.sort(key=lambda x: x[2], reverse=True)
+    kept_optional = {t: w for t, w, _ in optional[:remaining_slots]}
+
+    # --- Merge all ---
+    final = {**mandatory, **reserved, **kept_optional}
 
     # Redistribute dropped weight proportionally
     total_kept = sum(final.values())
@@ -917,8 +1096,9 @@ def _concentrate_portfolio(
 
     dropped = len(weights) - len(final)
     if dropped > 0:
-        logger.info("Concentrated portfolio: %d -> %d positions (dropped %d sub-2%% tickers)",
-                     len(weights), len(final), dropped)
+        logger.info("Concentrated portfolio: %d -> %d positions (dropped %d), "
+                    "reserved %d class-champion slots (industry/thematic/individual)",
+                    len(weights), len(final), dropped, len(reserved))
 
     return final
 
@@ -1233,7 +1413,10 @@ def run_portfolio_optimization(
             conn.close()
         return {}
 
-    # --- Step 5.5: Concentrate portfolio (FIX 5) ---
+    # --- Step 5.5: Inject screener stock picks (FIX B) ---
+    weights = _inject_screener_picks(weights, cfg, regime)
+
+    # --- Step 5.6: Concentrate portfolio (FIX 5) ---
     max_positions = cfg.get("optimizer", {}).get("max_positions", 15)
     weights = _concentrate_portfolio(weights, max_positions, factor_scores)
 

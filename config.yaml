@@ -334,6 +334,7 @@ optimizer:
   cvar_confidence: 0.95             # 95% CVaR
   tail_correlation_percentile: 10   # Longin-Solnik: joint returns below 10th percentile
   max_positions: 15                        # Maximum portfolio positions (FIX: was uncapped → 53 positions)
+  max_screener_picks: 5                    # Maximum individual stocks injected from screener (FIX B)
   em_weight_reduction_range: [0.20, 0.35]  # Expected EM reduction vs. naive CVaR
 
   # Regime-conditional allocation bands — AGGRESSIVE GROWTH

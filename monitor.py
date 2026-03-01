@@ -51,6 +51,50 @@ import pandas as pd
 import yaml
 
 # ---------------------------------------------------------------------------
+# TOP-LEVEL MODULE IMPORTS (FIX D.1)
+# ---------------------------------------------------------------------------
+# Import peer modules at the top level so import errors surface immediately
+# rather than being silently swallowed inside try/except blocks at runtime.
+# Each import is guarded individually so one broken module doesn't block all.
+# ---------------------------------------------------------------------------
+
+_data_feeds = None
+_regime_detector = None
+_portfolio_optimizer = None
+_nlp_sentiment = None
+
+try:
+    import data_feeds as _data_feeds
+except ImportError as _e:
+    logging.getLogger("monitor").error(
+        "IMPORT FAILED: data_feeds — %s. "
+        "Step 1 (data refresh) will be skipped. "
+        "Ensure data_feeds.py is in the same directory as monitor.py.", _e)
+
+try:
+    import regime_detector as _regime_detector
+except ImportError as _e:
+    logging.getLogger("monitor").error(
+        "IMPORT FAILED: regime_detector — %s. "
+        "Steps 2-3 (regime detection) will fall back to last known regime. "
+        "Ensure regime_detector.py is in the same directory.", _e)
+
+try:
+    import portfolio_optimizer as _portfolio_optimizer
+except ImportError as _e:
+    logging.getLogger("monitor").error(
+        "IMPORT FAILED: portfolio_optimizer — %s. "
+        "Step 4 (optimization) will use last allocation. "
+        "Ensure portfolio_optimizer.py is in the same directory.", _e)
+
+try:
+    import nlp_sentiment as _nlp_sentiment
+except ImportError as _e:
+    # NLP is optional — only log at INFO level
+    logging.getLogger("monitor").info(
+        "nlp_sentiment not available — NLP scoring will be skipped (%s)", _e)
+
+# ---------------------------------------------------------------------------
 # LOGGING
 # ---------------------------------------------------------------------------
 LOG_DIR = Path(__file__).parent
@@ -213,7 +257,7 @@ def run_data_refresh(conn: sqlite3.Connection, cfg: dict,
                      mock: bool = False) -> Dict[str, Any]:
     """
     Step 1: Pull fresh price data for all ETFs and macro series.
-    Wraps data_feeds.py.  Graceful-degrade: returns status dict.
+    FIX D.4: Uses data_feeds.run_full_ingestion() for complete pipeline.
     """
     result = {"step": "data_refresh", "status": "ok", "details": {}}
     if mock:
@@ -222,28 +266,24 @@ def run_data_refresh(conn: sqlite3.Connection, cfg: dict,
         logger.info("Data refresh: MOCK mode — skipping live pull.")
         return result
 
-    try:
-        from data_feeds import (
-            fetch_all_prices, fetch_macro_data, fetch_sec_filings
-        )
-        prices = fetch_all_prices(conn, cfg)
-        result["details"]["prices_rows"] = len(prices) if prices is not None else 0
-
-        macro = fetch_macro_data(conn, cfg)
-        result["details"]["macro_rows"] = len(macro) if macro is not None else 0
-
-        # SEC filings — only new 8-Ks
-        filings = fetch_sec_filings(conn, cfg, filing_types=["8-K"])
-        result["details"]["new_filings"] = len(filings) if filings is not None else 0
-
-    except ImportError:
+    if _data_feeds is None:
         result["status"] = "skip"
-        result["details"]["reason"] = "data_feeds module not importable"
+        result["details"]["reason"] = "data_feeds module not imported (see startup errors)"
         logger.warning("data_feeds not available — skipping data refresh.")
+        return result
+
+    try:
+        ingestion_result = _data_feeds.run_full_ingestion(cfg=cfg)
+        result["details"]["ingestion"] = {
+            "prices_stored": ingestion_result.get("prices_stored", 0),
+            "macro_stored": ingestion_result.get("macro_stored", 0),
+            "filings_stored": ingestion_result.get("filings_stored", 0),
+        }
+        logger.info("Data refresh complete: %s", result["details"]["ingestion"])
     except Exception as exc:
         result["status"] = "error"
         result["details"]["error"] = str(exc)
-        logger.error("Data refresh failed: %s", exc)
+        logger.error("Data refresh failed: %s", exc, exc_info=True)
     return result
 
 
@@ -252,6 +292,7 @@ def run_regime_detection(conn: sqlite3.Connection, cfg: dict,
     """
     Step 2-3: Recompute wedge volume percentile, regime probabilities,
     and Fast Shock Risk indicator.
+    FIX D.5: Uses regime_detector.run_regime_detection() top-level.
     """
     result = {"step": "regime_detection", "status": "ok", "regime_state": {}}
     if mock:
@@ -261,24 +302,28 @@ def run_regime_detection(conn: sqlite3.Connection, cfg: dict,
         result["details"] = {"mode": "mock"}
         return result
 
-    try:
-        from regime_detector import (
-            compute_daily_regime, get_db as regime_get_db
-        )
-        regime_state = compute_daily_regime(conn, cfg)
-        result["regime_state"] = regime_state
-    except ImportError:
+    if _regime_detector is None:
         result["status"] = "skip"
         regime = fetch_latest_regime(conn)
         result["regime_state"] = regime
-        result["details"] = {"reason": "regime_detector not importable"}
+        result["details"] = {"reason": "regime_detector module not imported (see startup errors)"}
         logger.warning("regime_detector not available — using last known regime.")
+        return result
+
+    try:
+        regime_result = _regime_detector.run_regime_detection(cfg=cfg)
+        # run_regime_detection returns a dict with regime_state info
+        if isinstance(regime_result, dict):
+            result["regime_state"] = regime_result
+        else:
+            # Fallback: re-read from DB after detection ran
+            result["regime_state"] = fetch_latest_regime(conn)
     except Exception as exc:
         result["status"] = "error"
         regime = fetch_latest_regime(conn)
         result["regime_state"] = regime
         result["details"] = {"error": str(exc)}
-        logger.error("Regime detection failed: %s", exc)
+        logger.error("Regime detection failed: %s", exc, exc_info=True)
     return result
 
 
@@ -308,8 +353,8 @@ def run_optimizer(conn: sqlite3.Connection, cfg: dict,
         return result
 
     try:
-        from portfolio_optimizer import run_optimization
-        alloc = run_optimization(conn, cfg, regime)
+        from portfolio_optimizer import run_portfolio_optimization
+        alloc = run_portfolio_optimization(conn, cfg, regime)
         result["allocation"] = alloc
     except ImportError:
         result["status"] = "skip"
@@ -328,6 +373,7 @@ def run_nlp_scoring(conn: sqlite3.Connection, cfg: dict,
                     mock: bool = False) -> Dict[str, Any]:
     """
     Step 6: Pull latest SEC filings and score sentiment.
+    Uses top-level _nlp_sentiment import.
     """
     result = {"step": "nlp_scoring", "status": "ok", "details": {}}
     if mock:
@@ -335,23 +381,22 @@ def run_nlp_scoring(conn: sqlite3.Connection, cfg: dict,
         logger.info("NLP scoring: MOCK mode — skipping.")
         return result
 
+    if _nlp_sentiment is None:
+        result["status"] = "skip"
+        result["details"]["reason"] = "nlp_sentiment module not available"
+        logger.warning("nlp_sentiment not available — skipping NLP scoring.")
+        return result
+
     try:
-        from nlp_sentiment import (
-            FinBERTScorer, score_all_filings, compute_sector_signals
-        )
-        scorer = FinBERTScorer(mock=True)  # Always mock in daily run for CI
-        scores_df = score_all_filings(conn, scorer, cfg)
-        signals_df = compute_sector_signals(conn, cfg)
+        scorer = _nlp_sentiment.FinBERTScorer(mock=True)
+        scores_df = _nlp_sentiment.score_all_filings(conn, scorer, cfg)
+        signals_df = _nlp_sentiment.compute_sector_signals(conn, cfg)
         result["details"]["filings_scored"] = len(scores_df)
         result["details"]["sector_signals"] = len(signals_df)
-    except ImportError:
-        result["status"] = "skip"
-        result["details"]["reason"] = "nlp_sentiment not importable"
-        logger.warning("nlp_sentiment not available — skipping NLP scoring.")
     except Exception as exc:
         result["status"] = "error"
         result["details"]["error"] = str(exc)
-        logger.error("NLP scoring failed: %s", exc)
+        logger.error("NLP scoring failed: %s", exc, exc_info=True)
     return result
 
 
@@ -536,22 +581,37 @@ class AlertEngine:
         return alerts
 
     def _compute_max_drift(self, prev: Dict, curr: Dict) -> float:
-        """Return the maximum allocation drift in basis points."""
+        """Return the maximum allocation drift in basis points.
+        Handles both flat float weights and nested position dicts."""
         all_keys = set(prev.keys()) | set(curr.keys())
         max_drift = 0.0
         for k in all_keys:
-            old = prev.get(k, 0.0) or 0.0
-            new = curr.get(k, 0.0) or 0.0
+            old = prev.get(k, 0.0)
+            new = curr.get(k, 0.0)
+            # Extract numeric weight from nested dict if present
+            if isinstance(old, dict):
+                old = old.get("pct", 0.0) / 100.0
+            if isinstance(new, dict):
+                new = new.get("pct", 0.0) / 100.0
+            old = old or 0.0
+            new = new or 0.0
             drift = abs(new - old) * 10000  # to bps
             max_drift = max(max_drift, drift)
         return max_drift
 
     def _check_entry_windows(self, prev: Dict, target: Dict) -> List[Dict]:
-        """Check for ENTRY_WINDOW conditions."""
+        """Check for ENTRY_WINDOW conditions.
+        Handles both flat float weights and nested position dicts."""
         now = dt.datetime.now().isoformat()
         alerts = []
         for asset, target_weight in target.items():
-            current = prev.get(asset, 0.0) or 0.0
+            current = prev.get(asset, 0.0)
+            # Extract numeric weight from nested dict if present
+            if isinstance(current, dict):
+                current = current.get("pct", 0.0) / 100.0
+            if isinstance(target_weight, dict):
+                target_weight = target_weight.get("pct", 0.0) / 100.0
+            current = current or 0.0
             target_w = target_weight or 0.0
             if target_w > current:
                 underweight_bps = (target_w - current) * 10000
@@ -958,6 +1018,17 @@ def main():
     # Paths
     db_path = Path(args.db) if args.db else DB_PATH
     config_path = Path(args.config) if args.config else CONFIG_PATH
+
+    # FIX D.3: Propagate --db path to all peer modules
+    if args.db:
+        logger.info("Custom DB path: %s — propagating to all modules", db_path)
+        # Propagate to peer modules that have their own DB_PATH globals
+        if _data_feeds is not None:
+            _data_feeds.DB_PATH = db_path
+        if _regime_detector is not None:
+            _regime_detector.DB_PATH = db_path
+        if _portfolio_optimizer is not None:
+            _portfolio_optimizer.DB_PATH = db_path
 
     cfg = load_config(config_path)
     conn = get_db(db_path)
