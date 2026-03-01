@@ -460,7 +460,6 @@ def run_cvar_optimization(
     Returns dict of ticker -> weight.
     """
     from pypfopt import EfficientCVaR
-    from pypfopt.expected_returns import mean_historical_return
 
     if returns.empty:
         return {}
@@ -496,8 +495,9 @@ def run_cvar_optimization(
                 if t1 in tail_corr.index and t2 in tail_corr.columns:
                     cov_df.loc[t1, t2] = tail_corr.loc[t1, t2] * std_df[t1] * std_df[t2]
 
-    # --- Expected returns ---
-    mu = mean_historical_return(returns, frequency=252)
+    # --- Expected returns (compute directly from log returns to avoid
+    #     pypfopt NaN/Inf warnings — mean_historical_return expects prices) ---
+    mu = returns.mean() * 252  # annualized expected returns from daily log returns
 
     # ---- FIX 3: Compute bounds with feasibility validation ----
     bounds = _compute_allocation_bounds(returns.columns.tolist(), regime, cfg, factor_scores)

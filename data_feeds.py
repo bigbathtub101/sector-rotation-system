@@ -164,14 +164,19 @@ def init_database(db_path: Path = DB_PATH) -> sqlite3.Connection:
 # 1. PRICE DATA — yfinance
 # ===========================================================================
 def _get_all_tickers(cfg: dict) -> List[str]:
-    """Flatten all ticker lists from config into a single deduplicated list."""
+    """Flatten all ticker lists from config into a single deduplicated list.
+    Also includes mega-cap tickers from ai_software_exclude (they need
+    prices for factor scoring / ETF top holdings even though they're
+    excluded from the AI software watchlist).
+    """
     tickers = []
     for key in ["sector_etfs", "geographic_etfs", "industry_etfs", "thematic_etfs",
                  "factor_etfs", "volatility", "benchmarks",
                  "watchlist_biotech", "watchlist_ai_software",
                  "watchlist_defense", "watchlist_green_materials",
                  "watchlist_semiconductors", "watchlist_energy_transition",
-                 "watchlist_fintech"]:
+                 "watchlist_fintech",
+                 "ai_software_exclude"]:
         tickers.extend(cfg["tickers"].get(key, []))
     # Deduplicate while preserving order
     seen = set()
@@ -542,7 +547,7 @@ def _download_filing_text(
 
     for attempt in range(1, max_retries + 1):
         try:
-            doc_resp = requests.get(url, headers=headers, timeout=60)
+            doc_resp = requests.get(url, headers=headers, timeout=30)
             _sec_sleep(cfg)
 
             if doc_resp.status_code == 200:
@@ -615,10 +620,13 @@ def fetch_filings_for_ticker(
     submissions_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
 
     try:
-        resp = requests.get(submissions_url, headers=headers, timeout=30)
+        resp = requests.get(submissions_url, headers=headers, timeout=15)
         _sec_sleep(cfg)
         resp.raise_for_status()
         sub_data = resp.json()
+    except requests.exceptions.Timeout:
+        logger.warning("Timeout fetching submissions for %s (CIK %s) — skipping", ticker, cik)
+        return []
     except Exception as e:
         logger.error("Failed to fetch submissions for %s (CIK %s): %s", ticker, cik, e)
         return []
@@ -675,6 +683,7 @@ def fetch_filings_for_ticker(
 def fetch_all_filings(
     cfg: dict,
     tickers: List[str] = None,
+    conn: sqlite3.Connection = None,
 ) -> List[dict]:
     """
     Fetch filings for the top holdings of each sector ETF
@@ -682,6 +691,11 @@ def fetch_all_filings(
 
     If no tickers are provided, dynamically resolves top holdings
     per sector ETF via yfinance, then adds all watchlist tickers.
+
+    Includes:
+      - Global time budget (max_fetch_time_seconds from config, default 300s)
+      - Per-ticker timeout protection
+      - Incremental mode: skips tickers already in DB if conn is provided
     """
     if tickers is None:
         tickers = []
@@ -704,20 +718,61 @@ def fetch_all_filings(
     # Deduplicate while preserving order
     tickers = list(dict.fromkeys(tickers))
 
+    # --- Incremental: skip tickers already in DB ---
+    if conn is not None:
+        try:
+            existing = set(
+                row[0] for row in
+                conn.execute("SELECT DISTINCT ticker FROM filings").fetchall()
+            )
+            before = len(tickers)
+            tickers = [t for t in tickers if t not in existing]
+            skipped = before - len(tickers)
+            if skipped > 0:
+                logger.info(
+                    "Incremental mode: skipping %d tickers already in DB, fetching %d new",
+                    skipped, len(tickers),
+                )
+        except Exception:
+            pass  # filings table may not exist yet
+
+    if not tickers:
+        logger.info("No new tickers to fetch filings for.")
+        return []
+
     total = len(tickers)
     max_per = cfg["sec_edgar"].get("max_filings_per_ticker", 2)
+    max_budget = cfg.get("sec_edgar", {}).get("max_fetch_time_seconds", 300)
     logger.info(
-        "\n📄 SEC FILING FETCH: %d tickers × up to %d filings each = %d max documents",
-        total, max_per, total * max_per,
+        "\n📄 SEC FILING FETCH: %d tickers × up to %d filings each = %d max documents (budget: %ds)",
+        total, max_per, total * max_per, max_budget,
     )
 
     all_filings = []
+    t0 = time.monotonic()
     for idx, ticker in enumerate(tickers, 1):
-        logger.info("[%d/%d] Fetching filings for %s ...", idx, total, ticker)
-        filings = fetch_filings_for_ticker(ticker, cfg)
-        all_filings.extend(filings)
+        # --- Global time budget check ---
+        elapsed = time.monotonic() - t0
+        if elapsed >= max_budget:
+            logger.warning(
+                "⏱️ Time budget exhausted (%.0fs / %ds) after %d/%d tickers — stopping SEC fetch gracefully.",
+                elapsed, max_budget, idx - 1, total,
+            )
+            break
 
-    logger.info("Total filings fetched: %d for %d tickers", len(all_filings), len(tickers))
+        logger.info("[%d/%d] Fetching filings for %s ...", idx, total, ticker)
+        try:
+            filings = fetch_filings_for_ticker(ticker, cfg)
+            all_filings.extend(filings)
+        except Exception as e:
+            logger.error("Filing fetch failed for %s: %s — skipping", ticker, e)
+            continue
+
+    elapsed_total = time.monotonic() - t0
+    logger.info(
+        "Total filings fetched: %d for %d tickers in %.0fs",
+        len(all_filings), len(tickers), elapsed_total,
+    )
     return all_filings
 
 
@@ -1041,7 +1096,7 @@ def run_full_ingestion(
         logger.info("=" * 60)
         logger.info("STEP 3: Fetching SEC EDGAR filings")
         logger.info("=" * 60)
-        filings = fetch_all_filings(cfg)
+        filings = fetch_all_filings(cfg, conn=conn)
         store_filings(conn, filings)
         summary["filings"] = {
             "total": len(filings),

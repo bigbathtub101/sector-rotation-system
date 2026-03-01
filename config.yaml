@@ -288,6 +288,7 @@ sec_edgar:
   download_retries: 3           # Retry attempts for 503/timeout on document downloads
   retry_backoff_base: 2         # Exponential backoff base (2s, 4s, 8s)
   top_holdings_per_etf: 5       # Number of top holdings to pull filings for
+  max_fetch_time_seconds: 300    # Global time budget for SEC fetch (prevents hangs)
   base_url: "https://data.sec.gov/submissions/"
   archives_url: "https://www.sec.gov/Archives/edgar/data/"
 
