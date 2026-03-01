@@ -213,7 +213,7 @@ tickers:
     - AMAT   # Applied Materials — equipment
     - LRCX   # Lam Research — equipment
     - KLAC   # KLA Corp — inspection/metrology
-    - ON     # ON Semiconductor — power/auto
+    - "ON"   # ON Semiconductor — power/auto
     - MPWR   # Monolithic Power — analog
     - CRUS   # Cirrus Logic — mixed-signal
     - RMBS   # Rambus — memory interface
@@ -232,7 +232,7 @@ tickers:
     - NNE    # Nano Nuclear Energy — micro-reactors
 
   watchlist_fintech:
-    - SQ     # Block (Square) — payments/crypto
+    - XYZ    # Block (formerly Square) — payments/crypto
     - AFRM   # Affirm — BNPL
     - SOFI   # SoFi Technologies — digital banking
     - UPST   # Upstart — AI lending

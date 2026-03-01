@@ -177,9 +177,14 @@ def _get_all_tickers(cfg: dict) -> List[str]:
     seen = set()
     unique = []
     for t in tickers:
-        if t not in seen:
+        if isinstance(t, str) and t not in seen:
             seen.add(t)
             unique.append(t)
+        elif not isinstance(t, str):
+            logger.warning(
+                "Skipping non-string ticker value: %r (check config.yaml for unquoted YAML booleans like ON/OFF/YES/NO)",
+                t,
+            )
     return unique
 
 
@@ -283,7 +288,7 @@ def fetch_prices(
     col_map = {}
     for c in prices.columns:
         cl = str(c).lower().strip().replace(" ", "_")
-        if cl in ("date", "datetime"):
+        if cl in ("date", "datetime", "index"):
             col_map[c] = "date"
         elif cl in ("adj_close", "adj close", "adjclose", "adjusted_close"):
             col_map[c] = "adj_close"
@@ -683,6 +688,15 @@ def validate_prices(prices: pd.DataFrame, cfg: dict) -> Tuple[pd.DataFrame, List
         return prices, warnings
 
     prices = prices.copy()
+    # Drop rows with null dates before any processing to avoid downstream errors
+    null_date_count = prices["date"].isna().sum()
+    if null_date_count:
+        logger.warning("Dropping %d rows with null date in validate_prices()", null_date_count)
+        prices = prices.dropna(subset=["date"])
+    if prices.empty:
+        warnings.append("DATA_QUALITY_WARNING: No price data available after dropping null-date rows.")
+        return prices, warnings
+
     prices["stale_price"] = 0
 
     # Identify the most recent trading date in the data
@@ -779,6 +793,13 @@ def store_prices(conn: sqlite3.Connection, prices: pd.DataFrame):
         return
     now = dt.datetime.utcnow().isoformat()
     prices = prices.copy()
+    # Drop rows with null dates to avoid NOT NULL constraint violations
+    null_date_count = prices["date"].isna().sum()
+    if null_date_count:
+        logger.warning("Dropping %d rows with null date before store_prices()", null_date_count)
+        prices = prices.dropna(subset=["date"])
+    if prices.empty:
+        return
     prices["fetched_at"] = now
 
     rows = prices[
