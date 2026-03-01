@@ -61,7 +61,7 @@ def _fetch_ticker_info(ticker: str) -> dict:
         ocf_yield = (ocf / market_cap) if market_cap > 0 else 0.0
 
         # Forward P/E: try forwardPE directly, else compute from forwardEps
-        # Guard: skip fallback when fwd_eps <= 0 (negative EPS → meaningless PE)
+        # Guard: skip fallback when fwd_eps <= 0 (negative EPS -> meaningless PE)
         if isinstance(fwd_pe, (int, float)) and fwd_pe > 0:
             forward_pe = fwd_pe
         else:
@@ -70,7 +70,7 @@ def _fetch_ticker_info(ticker: str) -> dict:
             if fwd_eps is not None and fwd_eps > 0 and price > 0:
                 forward_pe = price / fwd_eps
             else:
-                # Negative or zero fwd_eps → cannot compute meaningful PE
+                # Negative or zero fwd_eps -> cannot compute meaningful PE
                 forward_pe = None
 
         return {
@@ -96,7 +96,7 @@ def _fetch_ticker_info(ticker: str) -> dict:
 
 def _fetch_price_history(tickers: List[str], period: str = "2y") -> pd.DataFrame:
     """Fetch historical prices for multiple tickers via yfinance.
-    Returns wide-format DataFrame (date × ticker) of adjusted close prices.
+    Returns wide-format DataFrame (date x ticker) of adjusted close prices.
     """
     import yfinance as yf
 
@@ -117,24 +117,25 @@ def _fetch_price_history(tickers: List[str], period: str = "2y") -> pd.DataFrame
 
 
 def _fetch_etf_holdings(etf_ticker: str, top_n: int = 20) -> List[str]:
-    """Fetch top holdings of an ETF.
-
-    Tries data_feeds.get_etf_top_holdings() (yfinance dynamic API) first.
-    Falls back to a hardcoded mapping when the dynamic API returns nothing.
+    """Fetch top holdings of an ETF via yfinance.
+    Falls back to a hardcoded mapping if yfinance doesn't return holdings.
     """
-    # --- Dynamic lookup (primary) ---
+    import yfinance as yf
+
     try:
-        from data_feeds import get_etf_top_holdings as _dynamic_holdings
-        dynamic = _dynamic_holdings(etf_ticker, n=top_n)
-        if dynamic:
-            logger.info("Using dynamic holdings for %s (%d tickers)", etf_ticker, len(dynamic))
-            return dynamic
-    except Exception as e:
-        logger.debug("Dynamic holdings lookup failed for %s: %s", etf_ticker, e)
+        etf = yf.Ticker(etf_ticker)
+        # yfinance sometimes exposes holdings via .info or via specific methods
+        # In many cases the holdings are NOT available through the free API
+        # We use a fallback mapping for the sector ETFs
+        pass
+    except Exception:
+        pass
 
     # Hardcoded top holdings for sector ETFs (updated Feb 2026 approximate)
     # These are the real top holdings by weight — updated periodically
-    # Used as fallback when the dynamic API returns nothing.
+    # TODO: Replace with dynamic ETF holdings via finance_holdings API or
+    # yfinance etf.holdings when reliably available for all sector SPDRs.
+    # Current static list should be refreshed quarterly.
     _HOLDINGS = {
         "XLK": ["AAPL", "MSFT", "NVDA", "AVGO", "CRM", "ADBE", "AMD", "CSCO",
                  "ORCL", "ACN", "INTC", "IBM", "QCOM", "TXN", "INTU",
@@ -266,8 +267,8 @@ def apply_valuation_filter(info: dict, cfg: dict) -> str:
     momentum_pct = val_cfg.get("momentum_only_percentile", 75)
     avoid_pct = val_cfg.get("avoid_percentile", 90)
 
-    # Implied 3-year earnings growth = (Forward P/E × discount_rate) - 1
-    # Simplified: if P/E = 25 and r = 8%, implied growth ≈ 25 × 0.08 = 2.0 (100% growth)
+    # Implied 3-year earnings growth = (Forward P/E x discount_rate) - 1
+    # Simplified: if P/E = 25 and r = 8%, implied growth ~ 25 x 0.08 = 2.0 (100% growth)
     # More precisely: implied_growth = (fwd_pe / (1/r))^(1/3) - 1
     # where 1/r is the P/E of a zero-growth stock
     zero_growth_pe = 1.0 / discount_rate  # 12.5 at 8%
@@ -330,7 +331,7 @@ def screen_etf_holdings(
 
         label = apply_valuation_filter(info, cfg)
 
-        # Negative quality signals → AVOID override
+        # Negative quality signals -> AVOID override
         roe = info.get("roe")
         if roe is not None and roe < 0:
             label = "AVOID"
@@ -423,7 +424,7 @@ def score_biotech_watchlist(tickers: List[str], prices: pd.DataFrame, cfg: dict)
             "cash_score": round(cash_score, 4),
             "composite_score": round(composite, 4),
             "valuation_label": label,
-            "account": "roth_ira",  # ALL biotech → Roth
+            "account": "roth_ira",  # ALL biotech -> Roth
         })
 
     df = pd.DataFrame(records) if records else pd.DataFrame()
@@ -461,7 +462,7 @@ def score_ai_software_watchlist(tickers: List[str], prices: pd.DataFrame, cfg: d
         if mcap_m > max_cap:
             label = "EXCEEDS_CAP"  # Graduated beyond mid-cap
 
-        # Account placement per rules: profitable with P/E < 35 → taxable, else Roth
+        # Account placement per rules: profitable with P/E < 35 -> taxable, else Roth
         fwd_pe = info.get("forward_pe")
         if fwd_pe and fwd_pe < 35 and info.get("roe", 0) and info["roe"] > 0:
             account = "taxable"
@@ -515,7 +516,7 @@ def score_defense_watchlist(tickers: List[str], prices: pd.DataFrame, cfg: dict)
 
         label = apply_valuation_filter(info, cfg)
 
-        # Account: large long-duration defense → taxable, smaller speculative → Roth
+        # Account: large long-duration defense -> taxable, smaller speculative -> Roth
         if mcap_m > 10000:
             account = "taxable"
         else:
@@ -582,7 +583,7 @@ def score_materials_watchlist(tickers: List[str], prices: pd.DataFrame, cfg: dic
             "cost_curve_score": round(cost_curve_score, 4),
             "composite_score": round(composite, 4),
             "valuation_label": label,
-            "account": "taxable",  # Long-duration commodity → taxable
+            "account": "taxable",  # Long-duration commodity -> taxable
         })
 
     df = pd.DataFrame(records) if records else pd.DataFrame()
@@ -705,7 +706,6 @@ def compute_entry_exit_signals(
     watchlist_scores: Dict[str, pd.DataFrame],
     regime: str,
     cfg: dict,
-    sector_top_picks: Optional[pd.DataFrame] = None,
 ) -> Dict[str, List[dict]]:
     """Compute ENTRY and EXIT signals for all watchlist positions.
 
@@ -713,10 +713,6 @@ def compute_entry_exit_signals(
                 AND parent sector in Offense band.
     EXIT when:  momentum drops to bottom quartile OR valuation = AVOID
                 OR parent sector rotates to Defense.
-
-    sector_top_picks: optional DataFrame of cross-sector top picks from
-        run_stock_screener(). If provided, the same ENTRY/EXIT logic is applied
-        and signals are tagged with ``"source": "sector_screen"``.
 
     Returns dict of signal_type -> list of signal dicts.
     """
@@ -784,63 +780,6 @@ def compute_entry_exit_signals(
                     "signal": "EXIT",
                     "composite_score": row.get("composite_score", 0),
                     "valuation_label": label,
-                    "reason": "; ".join(reasons),
-                })
-
-    # --- Sector top picks signals ---
-    if sector_top_picks is not None and not sector_top_picks.empty:
-        stp = sector_top_picks.copy()
-        stp["score_pct"] = stp["composite_score"].rank(pct=True)
-        mom_col = "momentum_raw" if "momentum_raw" in stp.columns else "momentum"
-        if mom_col in stp.columns:
-            stp["mom_pct"] = stp[mom_col].rank(pct=True)
-        else:
-            stp["mom_pct"] = 0.5
-
-        for _, row in stp.iterrows():
-            ticker = row["ticker"]
-            label = row.get("valuation_label", "")
-            etf_src = row.get("etf", "sector_screen")
-
-            # --- ENTRY ---
-            is_top_quartile = row.get("score_pct", 0) >= min_score_pct
-            is_fundamental_buy = (label == "FUNDAMENTAL_BUY") if require_buy else True
-            is_offense = (regime == "offense") if require_offense else True
-
-            if is_top_quartile and is_fundamental_buy and is_offense:
-                signals["entry"].append({
-                    "ticker": ticker,
-                    "watchlist": etf_src,
-                    "signal": "ENTRY",
-                    "composite_score": row.get("composite_score", 0),
-                    "valuation_label": label,
-                    "account": "roth_ira",
-                    "source": "sector_screen",
-                    "reason": f"Top quartile score ({row.get('composite_score', 0):.3f}), "
-                              f"valuation={label}, regime={regime}",
-                })
-
-            # --- EXIT ---
-            is_bottom_momentum = row.get("mom_pct", 0.5) <= mom_bottom_pct
-            is_avoid = label == "AVOID"
-            is_defense_exit = (regime in ["defense", "panic"]) and defense_exit
-
-            if is_bottom_momentum or is_avoid or is_defense_exit:
-                reasons = []
-                if is_bottom_momentum:
-                    reasons.append("momentum in bottom quartile")
-                if is_avoid:
-                    reasons.append("valuation = AVOID")
-                if is_defense_exit:
-                    reasons.append(f"sector in {regime} regime")
-
-                signals["exit"].append({
-                    "ticker": ticker,
-                    "watchlist": etf_src,
-                    "signal": "EXIT",
-                    "composite_score": row.get("composite_score", 0),
-                    "valuation_label": label,
-                    "source": "sector_screen",
                     "reason": "; ".join(reasons),
                 })
 
@@ -1167,38 +1106,12 @@ def run_stock_screener(
     logger.info("Screening overweight ETFs: %s", overweight_etfs)
 
     # --- Step 3: Screen ETF holdings (Part A) ---
-    # When screen_all_sectors=True, screen all 11 GICS sectors for a cross-sector
-    # view (~220 stocks). Overweight ETFs are still used in Step 3b to filter
-    # sector_top_picks to the best sectors only.
-    screen_all = cfg.get("stock_screener", {}).get("screen_all_sectors", True)
-    all_sector_etfs = cfg.get("tickers", {}).get("sector_etfs", [])
-    etfs_to_screen = all_sector_etfs if screen_all else overweight_etfs
-
     etf_screens = {}
-    for etf in etfs_to_screen:
+    for etf in overweight_etfs:
         if mock:
             etf_screens[etf] = _generate_mock_screen_data(etf, cfg)
         else:
             etf_screens[etf] = screen_etf_holdings(etf, cfg)
-
-    # --- Step 3b: Build sector_top_picks ---
-    # Combine all ETF screens, keep only stocks from overweight sectors,
-    # rank cross-sectionally by composite_score, and take the top N.
-    top_picks_count = cfg.get("stock_screener", {}).get("sector_top_picks_count", 20)
-    non_empty_screens = [df for df in etf_screens.values() if not df.empty]
-    if non_empty_screens and overweight_etfs:
-        combined = pd.concat(non_empty_screens, ignore_index=True)
-        sector_top_picks = (
-            combined[combined["etf"].isin(overweight_etfs)]
-            .sort_values("composite_score", ascending=False)
-            .head(top_picks_count)
-            .reset_index(drop=True)
-        )
-    else:
-        # Returns empty intentionally: sector_top_picks requires at least one overweight ETF
-        # to avoid surfacing stocks from sectors the optimizer has not favored.
-        sector_top_picks = pd.DataFrame()
-    logger.info("sector_top_picks: %d stocks from overweight sectors", len(sector_top_picks))
 
     # --- Step 4: Score watchlists (Part B) ---
     if mock:
@@ -1207,8 +1120,7 @@ def run_stock_screener(
         watchlist_scores = run_all_watchlists(cfg)
 
     # --- Step 5: ENTRY/EXIT signals (Part C) ---
-    signals = compute_entry_exit_signals(watchlist_scores, regime, cfg,
-                                         sector_top_picks=sector_top_picks)
+    signals = compute_entry_exit_signals(watchlist_scores, regime, cfg)
 
     # --- Step 6: Biotech catalysts ---
     bio_tickers = cfg.get("tickers", {}).get("watchlist_biotech", [])
@@ -1224,7 +1136,6 @@ def run_stock_screener(
         "regime": regime,
         "overweight_etfs": overweight_etfs,
         "etf_screens": {etf: df.to_dict(orient="records") for etf, df in etf_screens.items()},
-        "sector_top_picks": sector_top_picks.to_dict(orient="records"),
         "watchlist_scores": {wl: df.to_dict(orient="records") for wl, df in watchlist_scores.items()},
         "signals": signals,
         "catalysts": catalysts,
@@ -1248,10 +1159,6 @@ def run_stock_screener(
         if not df.empty:
             csv_path = Path(__file__).parent / f"screen_{etf}.csv"
             df.to_csv(csv_path, index=False)
-
-    # Save sector_top_picks CSV
-    if not sector_top_picks.empty:
-        sector_top_picks.to_csv(Path(__file__).parent / "sector_top_picks.csv", index=False)
 
     if close_conn:
         conn.close()
