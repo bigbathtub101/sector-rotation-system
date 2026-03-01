@@ -447,15 +447,54 @@ def run_cvar_optimization(
         return dict(weights)
 
     except Exception as e:
-        logger.warning("CVaR optimization failed: %s — falling back to normalized band midpoints", e)
-        raw = {t: (bounds[t][0] + bounds[t][1]) / 2 for t in bounds}
+        logger.warning(
+            "CVaR optimization FAILED: %s — falling back to core-only regime midpoint allocation. "
+            "Thematic and industry ETFs excluded from fallback.",
+            e,
+        )
+
+        # Build core fallback universe: sector ETFs + BIL + top 3 geographic by momentum
+        core_tickers = [t for t in cfg["tickers"]["sector_etfs"] if t in returns.columns]
+        if "BIL" in returns.columns:
+            core_tickers.append("BIL")
+
+        # Add top 3 geographic ETFs by recent momentum (last 63 trading days)
+        geo_tickers_available = [t for t in cfg["tickers"]["geographic_etfs"] if t in returns.columns]
+        if geo_tickers_available and len(returns) > 63:
+            recent_ret = returns[geo_tickers_available].iloc[-63:].sum()
+            top_geo = recent_ret.nlargest(3).index.tolist()
+            core_tickers.extend(top_geo)
+
+        # Deduplicate
+        seen = set()
+        core_tickers = [t for t in core_tickers if not (t in seen or seen.add(t))]
+
+        # Compute regime midpoint weights per asset class
+        bands = cfg["optimizer"]["allocation_bands"]
+        class_weights = {}
+        for ac, regime_bands in bands.items():
+            band = regime_bands.get(regime, [0.0, 0.0])
+            class_weights[ac] = (band[0] + band[1]) / 2.0
+
+        # Count core tickers per asset class
+        core_class_counts = {}
+        for t in core_tickers:
+            ac = _get_asset_class(t)
+            core_class_counts[ac] = core_class_counts.get(ac, 0) + 1
+
+        # Assign per-ticker weight from class midpoint / count
+        raw = {}
+        for t in core_tickers:
+            ac = _get_asset_class(t)
+            n_in_class = max(1, core_class_counts.get(ac, 1))
+            raw[t] = class_weights.get(ac, 0.0) / n_in_class
+
         total = sum(raw.values())
         if total > 0:
             return {t: w / total for t, w in raw.items()}
         else:
-            # Absolute last resort: equal weight
-            n = len(bounds)
-            return {t: 1.0 / n for t in bounds} if n > 0 else {}
+            n = len(core_tickers)
+            return {t: 1.0 / n for t in core_tickers} if n > 0 else {}
 
 
 # ===========================================================================

@@ -497,13 +497,13 @@ _CIK_CACHE: Dict[str, str] = {}
 
 def _sec_headers(cfg: dict) -> dict:
     """Return compliant SEC User-Agent header."""
-    ua = cfg["sec_edgar"]["user_agent"]
+    ua = cfg["sec_edgar"]["user_agent"].strip()
     # Allow override via environment variable
     email = os.environ.get("SEC_EDGAR_EMAIL", "")
     if email:
         email = email.strip()  # remove \r\n from Colab secrets
         ua = f"QuantSystemBuilder/1.0 ({email})"
-    return {"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}
+    return {"User-Agent": ua.strip(), "Accept-Encoding": "gzip, deflate"}
 
 
 def _sec_sleep(cfg: dict):
