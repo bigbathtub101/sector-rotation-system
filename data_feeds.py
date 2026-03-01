@@ -501,7 +501,8 @@ def _sec_headers(cfg: dict) -> dict:
     # Allow override via environment variable
     email = os.environ.get("SEC_EDGAR_EMAIL", "")
     if email:
-        email = email.strip()  # remove \r\n from Colab secrets
+        # Colab Secrets can inject \r\n — strip AND replace explicitly
+        email = email.strip().replace("\r", "").replace("\n", "")
         ua = f"QuantSystemBuilder/1.0 ({email})"
     return {"User-Agent": ua.strip(), "Accept-Encoding": "gzip, deflate"}
 

@@ -402,6 +402,14 @@ def run_cvar_optimization(
     if em_tickers is None:
         em_tickers = cfg["tickers"]["geographic_etfs"]
 
+    # --- Drop tickers with NaN/Inf returns before optimization ---
+    bad_cols = returns.columns[np.isinf(returns).any() | returns.isna().any()]
+    if len(bad_cols) > 0:
+        logger.warning("Dropping %d tickers with NaN/Inf returns: %s", len(bad_cols), list(bad_cols))
+        returns = returns.drop(columns=bad_cols)
+    if returns.empty:
+        return {}
+
     # --- Covariance ---
     cov_matrix = compute_shrunk_covariance(returns)
     cov_df = pd.DataFrame(cov_matrix, index=returns.columns, columns=returns.columns)
@@ -465,9 +473,10 @@ def run_cvar_optimization(
             top_geo = recent_ret.nlargest(3).index.tolist()
             core_tickers.extend(top_geo)
 
-        # Deduplicate
+        # Deduplicate and cap at 20 positions to keep the fallback portfolio concentrated
         seen = set()
         core_tickers = [t for t in core_tickers if not (t in seen or seen.add(t))]
+        core_tickers = core_tickers[:20]
 
         # Compute regime midpoint weights per asset class
         bands = cfg["optimizer"]["allocation_bands"]
@@ -488,6 +497,19 @@ def run_cvar_optimization(
             ac = _get_asset_class(t)
             n_in_class = max(1, core_class_counts.get(ac, 1))
             raw[t] = class_weights.get(ac, 0.0) / n_in_class
+
+        # Validate fallback bounds feasibility: check that per-ticker lower bounds sum <= 1.0
+        # and upper bounds sum >= 1.0; if not, relax bounds by using equal weights.
+        fallback_bounds = _compute_allocation_bounds(core_tickers, regime, cfg, factor_scores)
+        lo_sum = sum(fallback_bounds.get(t, (0.0, 1.0))[0] for t in core_tickers)
+        hi_sum = sum(fallback_bounds.get(t, (0.0, 1.0))[1] for t in core_tickers)
+        if lo_sum > 1.0 or hi_sum < 1.0:
+            logger.warning(
+                "Fallback bounds infeasible (lo_sum=%.3f, hi_sum=%.3f) — using equal weights.",
+                lo_sum, hi_sum,
+            )
+            n = len(core_tickers)
+            return {t: 1.0 / n for t in core_tickers} if n > 0 else {}
 
         total = sum(raw.values())
         if total > 0:
@@ -1019,14 +1041,14 @@ def run_portfolio_optimization(
     # --- Step 3: Load price returns for optimization ---
     sector_tickers = cfg["tickers"]["sector_etfs"]
     geo_tickers = cfg["tickers"]["geographic_etfs"]
-    industry_tickers = cfg["tickers"].get("industry_etfs", [])
-    thematic_tickers = cfg["tickers"].get("thematic_etfs", [])
     cash_tickers = ["BIL"]
-    all_opt_tickers = sector_tickers + geo_tickers + industry_tickers + thematic_tickers + cash_tickers
+    # CVaR optimizer uses core ETFs only: sector + geographic + cash.
+    # Industry and thematic ETFs are excluded from the optimization universe.
+    all_opt_tickers = sector_tickers + geo_tickers + cash_tickers
     # Deduplicate while preserving order
     seen = set()
     all_opt_tickers = [t for t in all_opt_tickers if not (t in seen or seen.add(t))]
-    logger.info("Optimization universe: %d tickers", len(all_opt_tickers))
+    logger.info("Optimization universe: %d tickers (sector + geographic + cash only)", len(all_opt_tickers))
 
     placeholders = ",".join(["?"] * len(all_opt_tickers))
     prices = pd.read_sql_query(
@@ -1045,6 +1067,13 @@ def run_portfolio_optimization(
     wide = wide.sort_index().ffill().dropna(axis=1, how="all")
 
     returns = np.log(wide / wide.shift(1)).dropna()
+
+    # Drop any columns with remaining NaN/Inf
+    returns = returns.replace([np.inf, -np.inf], np.nan)
+    bad_cols = returns.columns[returns.isna().any()]
+    if len(bad_cols) > 0:
+        logger.warning("Excluding %d tickers with bad return data: %s", len(bad_cols), list(bad_cols))
+        returns = returns.drop(columns=bad_cols)
 
     # --- Step 4: CVaR optimization ---
     logger.info("Running CVaR optimization...")
