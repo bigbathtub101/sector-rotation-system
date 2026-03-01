@@ -402,14 +402,6 @@ def run_cvar_optimization(
     if em_tickers is None:
         em_tickers = cfg["tickers"]["geographic_etfs"]
 
-    # --- Drop tickers with NaN/Inf returns before optimization ---
-    bad_cols = returns.columns[np.isinf(returns).any() | returns.isna().any()]
-    if len(bad_cols) > 0:
-        logger.warning("Dropping %d tickers with NaN/Inf returns: %s", len(bad_cols), list(bad_cols))
-        returns = returns.drop(columns=bad_cols)
-    if returns.empty:
-        return {}
-
     # --- Covariance ---
     cov_matrix = compute_shrunk_covariance(returns)
     cov_df = pd.DataFrame(cov_matrix, index=returns.columns, columns=returns.columns)
@@ -455,68 +447,15 @@ def run_cvar_optimization(
         return dict(weights)
 
     except Exception as e:
-        logger.warning(
-            "CVaR optimization FAILED: %s — falling back to core-only regime midpoint allocation. "
-            "Thematic and industry ETFs excluded from fallback.",
-            e,
-        )
-
-        # Build core fallback universe: sector ETFs + BIL + top 3 geographic by momentum
-        core_tickers = [t for t in cfg["tickers"]["sector_etfs"] if t in returns.columns]
-        if "BIL" in returns.columns:
-            core_tickers.append("BIL")
-
-        # Add top 3 geographic ETFs by recent momentum (last 63 trading days)
-        geo_tickers_available = [t for t in cfg["tickers"]["geographic_etfs"] if t in returns.columns]
-        if geo_tickers_available and len(returns) > 63:
-            recent_ret = returns[geo_tickers_available].iloc[-63:].sum()
-            top_geo = recent_ret.nlargest(3).index.tolist()
-            core_tickers.extend(top_geo)
-
-        # Deduplicate and cap at 20 positions to keep the fallback portfolio concentrated
-        seen = set()
-        core_tickers = [t for t in core_tickers if not (t in seen or seen.add(t))]
-        core_tickers = core_tickers[:20]
-
-        # Compute regime midpoint weights per asset class
-        bands = cfg["optimizer"]["allocation_bands"]
-        class_weights = {}
-        for ac, regime_bands in bands.items():
-            band = regime_bands.get(regime, [0.0, 0.0])
-            class_weights[ac] = (band[0] + band[1]) / 2.0
-
-        # Count core tickers per asset class
-        core_class_counts = {}
-        for t in core_tickers:
-            ac = _get_asset_class(t)
-            core_class_counts[ac] = core_class_counts.get(ac, 0) + 1
-
-        # Assign per-ticker weight from class midpoint / count
-        raw = {}
-        for t in core_tickers:
-            ac = _get_asset_class(t)
-            n_in_class = max(1, core_class_counts.get(ac, 1))
-            raw[t] = class_weights.get(ac, 0.0) / n_in_class
-
-        # Validate fallback bounds feasibility: check that per-ticker lower bounds sum <= 1.0
-        # and upper bounds sum >= 1.0; if not, relax bounds by using equal weights.
-        fallback_bounds = _compute_allocation_bounds(core_tickers, regime, cfg, factor_scores)
-        lo_sum = sum(fallback_bounds.get(t, (0.0, 1.0))[0] for t in core_tickers)
-        hi_sum = sum(fallback_bounds.get(t, (0.0, 1.0))[1] for t in core_tickers)
-        if lo_sum > 1.0 or hi_sum < 1.0:
-            logger.warning(
-                "Fallback bounds infeasible (lo_sum=%.3f, hi_sum=%.3f) — using equal weights.",
-                lo_sum, hi_sum,
-            )
-            n = len(core_tickers)
-            return {t: 1.0 / n for t in core_tickers} if n > 0 else {}
-
+        logger.warning("CVaR optimization failed: %s — falling back to normalized band midpoints", e)
+        raw = {t: (bounds[t][0] + bounds[t][1]) / 2 for t in bounds}
         total = sum(raw.values())
         if total > 0:
             return {t: w / total for t, w in raw.items()}
         else:
-            n = len(core_tickers)
-            return {t: 1.0 / n for t in core_tickers} if n > 0 else {}
+            # Absolute last resort: equal weight
+            n = len(bounds)
+            return {t: 1.0 / n for t in bounds} if n > 0 else {}
 
 
 # ===========================================================================
@@ -666,7 +605,7 @@ def compute_bivector_beta(
     subset = returns[[sector_ticker] + candidate_cols]
 
     # Sort market tickers by available rows descending, keep those with
-    # ≥ min_obs rows in common with the sector ticker.
+    # >= min_obs rows in common with the sector ticker.
     sector_notna = returns[sector_ticker].notna()
     available = {}
     for c in candidate_cols:
@@ -698,7 +637,7 @@ def compute_bivector_beta(
 
     # Bivector Beta: inverse of |correlation| — higher = more orthogonal
     bivector_beta = 1.0 / max(abs(corr), 0.01)
-    logger.info("Bivector Beta %s: corr=%.4f, β_bv=%.4f (%d obs, %d market tickers)",
+    logger.info("Bivector Beta %s: corr=%.4f, beta_bv=%.4f (%d obs, %d market tickers)",
                 sector_ticker, corr, bivector_beta, clean.shape[0], len(candidate_cols))
     return round(bivector_beta, 4)
 
@@ -811,7 +750,7 @@ def allocate_dollars(
     roth_tickers = set()
     taxable_tickers = set()
 
-    # Watchlist tickers → Roth
+    # Watchlist tickers -> Roth
     for key in ["watchlist_biotech", "watchlist_ai_software",
                 "watchlist_defense", "watchlist_green_materials",
                 "watchlist_semiconductors", "watchlist_energy_transition",
@@ -819,19 +758,19 @@ def allocate_dollars(
         for t in cfg["tickers"].get(key, []):
             roth_tickers.add(t)
 
-    # Thematic ETFs → Roth (high turnover)
+    # Thematic ETFs -> Roth (high turnover)
     for t in cfg["tickers"].get("thematic_etfs", []):
         roth_tickers.add(t)
 
-    # Geographic ETFs → Taxable (foreign tax credit)
+    # Geographic ETFs -> Taxable (foreign tax credit)
     for t in cfg["tickers"].get("geographic_etfs", []):
         taxable_tickers.add(t)
 
-    # Cash/bonds → Taxable
+    # Cash/bonds -> Taxable
     for t in ["BIL", "AGG", "TLT"]:
         taxable_tickers.add(t)
 
-    # Energy/Materials ETFs → Taxable (structural diversifier, low turnover)
+    # Energy/Materials ETFs -> Taxable (structural diversifier, low turnover)
     for t in ["XLE", "XLB", "GLD"]:
         taxable_tickers.add(t)
 
@@ -942,7 +881,7 @@ def allocate_dollars(
                 roth_used += roth_dollars
 
         else:
-            # Default: broad ETF → taxable (long-term hold)
+            # Default: broad ETF -> taxable (long-term hold)
             if taxable_used + dollars <= taxable_cap:
                 account = "taxable"
                 taxable_dollars = dollars
@@ -1041,14 +980,14 @@ def run_portfolio_optimization(
     # --- Step 3: Load price returns for optimization ---
     sector_tickers = cfg["tickers"]["sector_etfs"]
     geo_tickers = cfg["tickers"]["geographic_etfs"]
+    industry_tickers = cfg["tickers"].get("industry_etfs", [])
+    thematic_tickers = cfg["tickers"].get("thematic_etfs", [])
     cash_tickers = ["BIL"]
-    # CVaR optimizer uses core ETFs only: sector + geographic + cash.
-    # Industry and thematic ETFs are excluded from the optimization universe.
-    all_opt_tickers = sector_tickers + geo_tickers + cash_tickers
+    all_opt_tickers = sector_tickers + geo_tickers + industry_tickers + thematic_tickers + cash_tickers
     # Deduplicate while preserving order
     seen = set()
     all_opt_tickers = [t for t in all_opt_tickers if not (t in seen or seen.add(t))]
-    logger.info("Optimization universe: %d tickers (sector + geographic + cash only)", len(all_opt_tickers))
+    logger.info("Optimization universe: %d tickers", len(all_opt_tickers))
 
     placeholders = ",".join(["?"] * len(all_opt_tickers))
     prices = pd.read_sql_query(
@@ -1067,13 +1006,6 @@ def run_portfolio_optimization(
     wide = wide.sort_index().ffill().dropna(axis=1, how="all")
 
     returns = np.log(wide / wide.shift(1)).dropna()
-
-    # Drop any columns with remaining NaN/Inf
-    returns = returns.replace([np.inf, -np.inf], np.nan)
-    bad_cols = returns.columns[returns.isna().any()]
-    if len(bad_cols) > 0:
-        logger.warning("Excluding %d tickers with bad return data: %s", len(bad_cols), list(bad_cols))
-        returns = returns.drop(columns=bad_cols)
 
     # --- Step 4: CVaR optimization ---
     logger.info("Running CVaR optimization...")
