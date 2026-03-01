@@ -290,6 +290,9 @@ sec_edgar:
   efts_search_url: "https://efts.sec.gov/LATEST/search-index"
   efts_batch_size: 10           # tickers per EFTS query batch
   use_efts_primary: true        # Use EFTS as primary discovery, submissions as fallback
+  max_fetch_time_seconds: 300   # Global time budget for all filings (5 min)
+  max_concurrent_downloads: 5   # Parallel document text downloads
+  doc_download_timeout: 20      # Per-document download timeout (seconds)
 
 # --------------------------------------------------------------------------
 # REGIME DETECTION PARAMETERS (Section 2, 8.2)
