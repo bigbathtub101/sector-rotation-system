@@ -595,21 +595,36 @@ def fetch_filings_for_ticker(
             f"{cik}/{accession_path}/{primary_doc}"
         )
 
-        # Attempt to download filing text
+        # Attempt to download filing text with exponential backoff on 503
         raw_text = ""
-        try:
-            doc_resp = requests.get(filing_url, headers=headers, timeout=60)
-            _sec_sleep(cfg)
-            if doc_resp.status_code == 200:
-                # Take first 100KB to avoid memory issues
-                raw_text = doc_resp.text[:100_000]
-            else:
-                logger.warning(
-                    "Non-200 status (%d) fetching filing %s for %s",
-                    doc_resp.status_code, accession, ticker,
-                )
-        except Exception as e:
-            logger.error("Failed to download filing %s for %s: %s", accession, ticker, e)
+        for attempt in range(3):
+            try:
+                doc_resp = requests.get(filing_url, headers=headers, timeout=60)
+                _sec_sleep(cfg)
+                if doc_resp.status_code == 200:
+                    # Take first 100KB to avoid memory issues
+                    raw_text = doc_resp.text[:100_000]
+                    break
+                elif doc_resp.status_code == 503:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "503 fetching filing %s for %s (attempt %d/3) — retrying in %ds",
+                        accession, ticker, attempt + 1, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.warning(
+                        "Non-200 status (%d) fetching filing %s for %s",
+                        doc_resp.status_code, accession, ticker,
+                    )
+                    break
+            except Exception as e:
+                logger.error("Failed to download filing %s for %s: %s", accession, ticker, e)
+                break
+        else:
+            logger.warning(
+                "All retries exhausted for filing %s for %s", accession, ticker,
+            )
 
         results.append({
             "cik": cik,
