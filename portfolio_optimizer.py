@@ -645,6 +645,27 @@ def _get_asset_class(ticker: str) -> str:
 # ETF STRUCTURAL QUALITY FILTER (Phase 11 Enhancement)
 # ===========================================================================
 
+def _redistribute_excess(
+    adjusted: Dict[str, float],
+    excess: float,
+    exclude: set,
+) -> None:
+    """
+    Redistribute excess weight pro-rata across all equity positions,
+    excluding BIL (cash) and any tickers in the exclude set.
+    Modifies `adjusted` in place.
+    """
+    eligible = {t: w for t, w in adjusted.items()
+                if w > 0 and t != "BIL" and t not in exclude}
+    total_eligible = sum(eligible.values())
+    if total_eligible > 0:
+        for t, w in eligible.items():
+            adjusted[t] = w + excess * (w / total_eligible)
+    else:
+        # Fallback: no eligible equity positions — park in BIL
+        adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+
+
 def apply_etf_quality_filter(
     weights: Dict[str, float],
     cfg: dict,
@@ -657,6 +678,9 @@ def apply_etf_quality_filter(
        concentrates weight into the preferred (cheapest/broadest) member
     3. Single-country concentration cap
     4. Total EM / international caps
+
+    Excess from caps is redistributed pro-rata across all equity positions
+    (not dumped into BIL/cash) to keep capital fully deployed.
 
     All thresholds are in config.yaml under etf_quality.
     """
@@ -753,10 +777,11 @@ def apply_etf_quality_filter(
         if adjusted.get(t, 0) > max_region_pct:
             excess = adjusted[t] - max_region_pct
             adjusted[t] = max_region_pct
-            # Redistribute excess to BIL (cash) — don't inflate other regions
-            adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+            # Redistribute excess pro-rata across all other equities
+            _redistribute_excess(adjusted, excess, exclude={t})
             logger.info("ETF quality: %s capped at %.1f%% (single-region cap), "
-                        "excess %.4f to BIL", t, max_region_pct * 100, excess)
+                        "excess %.4f redistributed to equities",
+                        t, max_region_pct * 100, excess)
 
     # --- 4. Total EM and international caps ---
     em_tickers = [t for t, w in adjusted.items()
@@ -767,10 +792,10 @@ def apply_etf_quality_filter(
         excess = em_total - max_em_pct
         for t in em_tickers:
             adjusted[t] *= scale
-        # Put excess into cash (BIL)
-        adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+        # Redistribute excess pro-rata across non-EM equities
+        _redistribute_excess(adjusted, excess, exclude=set(em_tickers))
         logger.info("ETF quality: total EM %.1f%% > %.1f%% cap — scaled down, "
-                    "excess to BIL", em_total * 100, max_em_pct * 100)
+                    "excess redistributed to equities", em_total * 100, max_em_pct * 100)
 
     intl_classes = {"intl_developed", "em_equities"}
     intl_tickers = [t for t, w in adjusted.items()
@@ -781,8 +806,10 @@ def apply_etf_quality_filter(
         excess = intl_total - max_intl_pct
         for t in intl_tickers:
             adjusted[t] *= scale
-        adjusted["BIL"] = adjusted.get("BIL", 0) + excess
-        logger.info("ETF quality: total intl %.1f%% > %.1f%% cap — scaled down",
+        # Redistribute excess pro-rata across domestic equities
+        _redistribute_excess(adjusted, excess, exclude=set(intl_tickers))
+        logger.info("ETF quality: total intl %.1f%% > %.1f%% cap — scaled down, "
+                    "excess redistributed to equities",
                     intl_total * 100, max_intl_pct * 100)
 
     # --- Normalize back to 1.0 ---
@@ -798,14 +825,14 @@ def apply_etf_quality_filter(
             if adjusted.get(t, 0) > max_region_pct + 1e-6:
                 excess = adjusted[t] - max_region_pct
                 adjusted[t] = max_region_pct
-                adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+                _redistribute_excess(adjusted, excess, exclude={t})
                 any_clipped = True
         # Re-check country caps
         country_etfs_final = [t for t in adjusted if t in country_etfs_set and adjusted[t] > max_country_pct + 1e-6]
         for t in country_etfs_final:
             excess = adjusted[t] - max_country_pct
             adjusted[t] = max_country_pct
-            adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+            _redistribute_excess(adjusted, excess, exclude={t})
             any_clipped = True
         if any_clipped:
             total = sum(adjusted.values())

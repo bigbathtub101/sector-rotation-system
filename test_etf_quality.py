@@ -135,10 +135,10 @@ result_region = apply_etf_quality_filter(weights_region, cfg)
 check(f"VGK capped at <= {max_region*100:.0f}%",
       result_region.get("VGK", 0) <= max_region + 0.005,
       f"VGK={result_region.get('VGK', 0)*100:.2f}%")
-# Excess should go to BIL
-check("Excess redistributed to BIL",
-      result_region.get("BIL", 0) > 0.30,
-      f"BIL={result_region.get('BIL', 0)*100:.2f}%")
+# Excess should go to other equities, not BIL
+check("Excess redistributed to equities (not BIL)",
+      result_region.get("BIL", 0) <= 0.30 + 0.005,
+      f"BIL={result_region.get('BIL', 0)*100:.2f}% (should stay near 30%, excess goes to equities)")
 
 # Same test for VWO
 weights_vwo_big = {
