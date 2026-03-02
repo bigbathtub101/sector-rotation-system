@@ -1085,6 +1085,9 @@ def main():
         description="Phase 5 — Monitoring Engine & Alert System")
     parser.add_argument("--mock", action="store_true",
                         help="Run in mock mode (no live data pulls)")
+    parser.add_argument("--run-daily", action="store_true",
+                        help="Production mode: live data + live delivery "
+                             "(used by GitHub Actions cron)")
     parser.add_argument("--db", type=str, default=None,
                         help="Path to SQLite database")
     parser.add_argument("--config", type=str, default=None,
@@ -1092,6 +1095,17 @@ def main():
     parser.add_argument("--no-deliver", action="store_true",
                         help="Skip Telegram/email/Sheets delivery")
     args = parser.parse_args()
+
+    # --run-daily is the inverse of --mock + --no-deliver:
+    #   --run-daily  =>  mock=False, no_deliver=False  (live everything)
+    #   --mock       =>  mock=True  (skip data pulls, use DB state)
+    #   default      =>  live data, live delivery (same as --run-daily)
+    # So --run-daily is explicitly accepted for clarity in CI but
+    # functionally identical to the default (no flags).
+    if args.run_daily:
+        args.mock = False
+        args.no_deliver = False
+        logger.info("--run-daily flag set: LIVE data + LIVE delivery mode.")
 
     # Paths
     db_path = Path(args.db) if args.db else DB_PATH
