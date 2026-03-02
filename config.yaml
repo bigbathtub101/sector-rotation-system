@@ -403,7 +403,7 @@ factor_model:
     discount_rate: 0.08             # 8% discount rate for implied growth calculation
     momentum_only_percentile: 75    # Above this = "momentum tilt only"
     avoid_percentile: 90            # Above this = AVOID label
-    momentum_cap_fraction: 0.50     # Cap at 50% of equal-weight if momentum-only
+    momentum_cap_fraction: 0.75     # Was 0.50 — reduce penalty for momentum-only (growth bias)
 
 # --------------------------------------------------------------------------
 # CVaR OPTIMIZATION PARAMETERS (Section 5, 8.1)
@@ -415,6 +415,7 @@ optimizer:
   tail_correlation_percentile: 10   # Longin-Solnik: joint returns below 10th percentile
   max_positions: 15                        # Maximum portfolio positions (FIX: was uncapped → 53 positions)
   max_screener_picks: 5                    # Maximum individual stocks injected from screener (FIX B)
+  min_position_pct: 3.0                    # Drop and redistribute positions below this % (critique fix)
   em_weight_reduction_range: [0.20, 0.35]  # Expected EM reduction vs. naive CVaR
 
   # Regime-conditional allocation bands — AGGRESSIVE GROWTH
@@ -427,7 +428,7 @@ optimizer:
     intl_developed:
       panic: [0.00, 0.05]          # Was [0.00, 0.00] — small intl hedge
       defense: [0.05, 0.15]        # Unchanged
-      offense: [0.15, 0.25]        # Unchanged — intl developed stays moderate
+      offense: [0.20, 0.30]        # Was [0.15, 0.25] — lean into cheap intl valuations
     em_equities:
       panic: [0.00, 0.02]          # Was [0.00, 0.00] — tiny EM position OK
       defense: [0.02, 0.10]        # Was [0.00, 0.08]
@@ -439,7 +440,7 @@ optimizer:
     healthcare:
       panic: [0.05, 0.15]          # Was [0.05, 0.10] — healthcare as defense
       defense: [0.10, 0.20]        # Unchanged
-      offense: [0.10, 0.18]        # Unchanged
+      offense: [0.05, 0.12]        # Was [0.10, 0.18] — cap CVaR's defensive healthcare bias
     industry_sub:
       panic: [0.00, 0.00]          # NEW — industry ETFs sit out in Panic
       defense: [0.00, 0.05]        # NEW — minimal in Defense
@@ -451,7 +452,7 @@ optimizer:
     cash_short_duration:
       panic: [0.50, 0.80]          # Was [0.70, 1.00] — less cash even in Panic
       defense: [0.15, 0.30]        # Was [0.30, 0.60] — cut cash in Defense
-      offense: [0.00, 0.05]        # Was [0.05, 0.15] — near-zero cash in Offense
+      offense: [0.00, 0.03]        # Was [0.00, 0.05] — near-zero cash for 27yo offense
     vix_overlay_notional:
       panic: [0.00, 0.02]          # Unchanged
       defense: [0.02, 0.04]        # Unchanged

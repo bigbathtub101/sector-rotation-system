@@ -1056,10 +1056,10 @@ def apply_us_subsector_allocation(
         bv_betas[ticker] = bv_beta
 
     # --- Pass 2: compute proportional weights ---
-    # Shift scores so the minimum maps to a small positive base
-    # (prevents total starvation of lower-scored sectors)
+    # Shift scores: high-score ETFs get meaningfully more weight.
+    # Small base (0.02) prevents total starvation but widens the spread.
     min_score = min(raw_scores.values())
-    shifted = {t: (s - min_score + 0.10) for t, s in raw_scores.items()}
+    shifted = {t: (s - min_score + 0.02) for t, s in raw_scores.items()}
 
     # Apply label overrides before normalizing
     for ticker in us_sectors:
@@ -1630,6 +1630,36 @@ def run_portfolio_optimization(
     logger.info("Applying ETF quality filter (expense ratios, overlap, caps)...")
     weights = apply_etf_quality_filter(weights, cfg)
     logger.info("Post-quality weights: %d positions", sum(1 for w in weights.values() if w > 0.001))
+
+    # --- Step 5.8: Minimum position size enforcement ---
+    min_pct = cfg.get("optimizer", {}).get("min_position_pct", 0) / 100.0
+    if min_pct > 0:
+        dropped = []
+        for _ in range(10):  # iterate until no sub-minimum positions remain
+            sub_min = {t: w for t, w in weights.items()
+                       if 0 < w < min_pct and t != "BIL"}
+            if not sub_min:
+                break
+            total_excess = sum(sub_min.values())
+            for t in sub_min:
+                dropped.append((t, weights[t]))
+                weights[t] = 0.0
+            # Redistribute pro-rata across remaining equity positions
+            _redistribute_excess(weights, total_excess, exclude=set(sub_min.keys()))
+            # Re-normalize
+            total_w = sum(weights.values())
+            if total_w > 0:
+                weights = {t: w / total_w for t, w in weights.items()}
+            # Remove zeroed entries
+            weights = {t: w for t, w in weights.items() if w > 0.001}
+        if dropped:
+            logger.info("Min position filter: dropped %d positions below %.1f%%: %s",
+                        len(dropped), min_pct * 100,
+                        ", ".join(f"{t} ({w*100:.1f}%)" for t, w in dropped))
+        logger.info("Post-min-filter: %d positions", len(weights))
+
+        # Re-apply quality caps since redistribution may have inflated capped ETFs
+        weights = apply_etf_quality_filter(weights, cfg)
 
     # --- Step 6: Dollar allocation ---
     logger.info("Computing dollar allocation...")
