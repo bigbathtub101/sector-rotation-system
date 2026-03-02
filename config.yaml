@@ -12,14 +12,14 @@
 # PORTFOLIO CONTEXT
 # --------------------------------------------------------------------------
 portfolio:
-  total_value: 143929
+  total_value: 144000
   accounts:
     taxable:
-      value: 97970
+      value: 100000
       type: "Individual Brokerage"
       tax_treatment: "Capital gains taxed; long-term preferred"
     roth_ira:
-      value: 45959
+      value: 44000
       type: "Retirement"
       tax_treatment: "All growth permanently tax-free"
 
@@ -709,19 +709,6 @@ stock_screener:
   top_holdings_count: 20            # Pull top N holdings from each overweight ETF
   min_price_history_days: 252       # Minimum trading days needed for scoring
   watchlist_pos_pct: 0.04           # Each watchlist position = 4% of assigned account (was 2%)
-  scoring_weights:
-    momentum: 0.30                  # 12-1 month momentum rank
-    quality: 0.25                   # ROE + gross margin + OCF yield
-    value: 0.25                     # Forward P/E vs 5yr median
-    size: 0.20                      # Market cap rank (small/mid-cap bonus)
-  valuation_filter:
-    discount_rate: 0.08             # 8% discount rate for implied growth
-    momentum_only_percentile: 75    # Implied growth > 75th = MOMENTUM_ONLY
-    avoid_percentile: 90            # Implied growth > 90th = AVOID
-  entry_signal:
-    min_factor_score_percentile: 75 # Top quartile factor score required
-    require_fundamental_buy: true   # Must pass valuation filter
-    require_offense_regime: true    # Parent sector must be in Offense band
-  exit_signal:
-    momentum_bottom_percentile: 25  # Momentum drops to bottom quartile
-    trigger_on_defense_rotation: true  # Exit when sector rotates to Defense
+  roth_satellite_pct: 0.20          # 20% of Roth IRA reserved for individual stock picks
+  satellite_stock_count: 5          # Top 5 screener pi
+... [truncated, 30954 chars total]
