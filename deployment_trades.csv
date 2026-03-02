@@ -1,0 +1,23 @@
+order,ticker,action,account,shares,price,target_dollars,actual_dollars,reason
+0,SGOV,SELL,taxable,996.1152,100.39,100000,100000.0,Liquidate cash position to fund deployment
+0,JAAA,SELL,roth_ira,873.8828,50.35,44000,44000.0,Liquidate cash position to fund deployment
+1,VGK,BUY,taxable,234,88.14,20639.44,20624.76,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+2,XLK,BUY,taxable,85,138.18,11763.94,11745.3,"Taxable: broad ETF, long-term hold"
+3,BIL,BUY,taxable,125,91.39,11504.71,11423.75,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+4,BWXT,BUY,roth_ira,42,214.7,9201.36,9017.4,Roth: thematic/high-turnover/momentum position
+5,AFRM,BUY,roth_ira,197,46.61,9201.36,9182.17,Roth: thematic/high-turnover/momentum position
+6,XLB,BUY,taxable,165,52.9,8776.99,8728.5,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+7,MPWR,BUY,roth_ira,7,1111.04,8364.87,7777.28,Roth: thematic/high-turnover/momentum position
+8,MDB,BUY,roth_ira,22,327.5,7444.74,7205.0,Roth: thematic/high-turnover/momentum position
+9,XLU,BUY,taxable,140,47.47,6651.71,6645.8,"Taxable: broad ETF, long-term hold"
+10,OKTA,BUY,roth_ira,86,73.89,6422.36,6354.54,Roth: thematic/high-turnover/momentum position
+11,EEM,BUY,taxable,94,61.11,5752.35,5744.34,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+12,EWT,BUY,taxable,76,74.85,5752.35,5688.6,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+13,EWY,BUY,taxable,39,144.19,5752.35,5623.41,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+14,EWZ,BUY,taxable,150,38.26,5752.35,5739.0,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+15,FXI,BUY,taxable,156,36.72,5752.35,5728.32,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+16,VWO,BUY,taxable,100,57.08,5752.35,5708.0,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+17,EWJ,BUY,taxable,62,89.8,5568.28,5567.6,Taxable: geographic/cash/energy (foreign tax credit / low turnover)
+18,AIQ,BUY,roth_ira,40,49.56,2029.43,1982.4,Roth: thematic/high-turnover/momentum position
+19,HACK,BUY,taxable,7,73.71,580.83,515.97,Split: capacity constrained ($581 Taxable + $1336 Roth)
+20,HACK,BUY,roth_ira,18,73.71,1335.85,1326.78,Split: capacity constrained ($581 Taxable + $1336 Roth)
