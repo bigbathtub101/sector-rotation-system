@@ -121,7 +121,7 @@ def load_regime_history(days: int = 730) -> pd.DataFrame:
 @st.cache_data(ttl=60)
 def load_latest_allocation() -> Optional[Dict]:
     row = query_one(
-        "SELECT date, regime, allocations, taxable_dollars, roth_dollars "
+        "SELECT date, regime, allocation_json, dollar_taxable, dollar_roth "
         "FROM allocations ORDER BY date DESC LIMIT 1"
     )
     if row:
@@ -137,7 +137,8 @@ def load_latest_allocation() -> Optional[Dict]:
 @st.cache_data(ttl=60)
 def load_all_allocations() -> pd.DataFrame:
     return query_df(
-        "SELECT date, regime, allocations, taxable_dollars, roth_dollars "
+        "SELECT date, regime, allocation_json AS allocations, "
+        "dollar_taxable AS taxable_dollars, dollar_roth AS roth_dollars "
         "FROM allocations ORDER BY date DESC"
     )
 
@@ -288,6 +289,7 @@ cfg = load_config()
 PAGES = [
     "📈 Regime Dashboard",
     "💼 Portfolio Allocation",
+    "🏦 My Holdings",
     "🔍 Signal Detail",
     "🎯 Stock Screener",
     "🔔 Alerts Log",
@@ -617,6 +619,253 @@ def page_portfolio_allocation():
                 st.info("No historical allocation data.")
     else:
         st.info("No allocation data available. Run `monitor.py --mock` to populate.")
+
+
+# ===========================================================================
+# PAGE 2B: MY HOLDINGS (actual vs target)
+# ===========================================================================
+
+def load_holdings() -> pd.DataFrame:
+    """Load current holdings from DB."""
+    return query_df(
+        "SELECT ticker, account, shares, avg_cost, cost_basis, current_price, "
+        "market_value, unrealized_pnl, asset_class, weight_pct, updated_at "
+        "FROM holdings WHERE shares > 0 ORDER BY market_value DESC"
+    )
+
+
+def load_trades(limit: int = 50) -> pd.DataFrame:
+    """Load recent trade history."""
+    return query_df(
+        "SELECT date, ticker, action, shares, price, total_cost, account, notes "
+        "FROM trades ORDER BY date DESC, trade_id DESC LIMIT ?",
+        (limit,),
+    )
+
+
+def page_my_holdings():
+    st.title("My Holdings")
+    st.caption("Actual portfolio positions vs system target allocation")
+
+    total_val = cfg.get("portfolio", {}).get("total_value", 144000)
+    taxable_val = cfg.get("portfolio", {}).get("accounts", {}).get("taxable", {}).get("value", 100000)
+    roth_val = cfg.get("portfolio", {}).get("accounts", {}).get("roth_ira", {}).get("value", 44000)
+
+    holdings_df = load_holdings()
+
+    if holdings_df.empty:
+        st.warning(
+            "No holdings recorded yet. Use the holdings tracker CLI to log your trades:\n\n"
+            "```bash\n"
+            "python holdings_tracker.py buy XLK 50 --price 210.00 --account taxable\n"
+            "```"
+        )
+        return
+
+    # --- Top metrics ---
+    total_invested = holdings_df["market_value"].sum() or 0
+    total_pnl = holdings_df["unrealized_pnl"].sum() or 0
+    total_cost = holdings_df["cost_basis"].sum() if "cost_basis" in holdings_df.columns else 0
+    deployment_pct = total_invested / total_val * 100 if total_val > 0 else 0
+    pnl_pct = total_pnl / total_cost * 100 if total_cost > 0 else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Invested", f"${total_invested:,.0f}", f"{deployment_pct:.1f}% deployed")
+    m2.metric("Cash", f"${total_val - total_invested:,.0f}")
+    m3.metric("Unrealized P&L", f"${total_pnl:,.0f}",
+             f"{pnl_pct:+.1f}%" if total_cost > 0 else None,
+             delta_color="normal")
+    m4.metric("Positions", f"{len(holdings_df)}")
+
+    st.markdown("---")
+
+    # --- Holdings table ---
+    st.subheader("Current Positions")
+
+    display_df = holdings_df.copy()
+    for col in ["avg_cost", "current_price"]:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"${x:,.2f}" if pd.notna(x) else "—"
+            )
+    for col in ["market_value", "unrealized_pnl"]:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"${x:,.2f}" if pd.notna(x) else "—"
+            )
+    if "weight_pct" in display_df.columns:
+        display_df["weight_pct"] = display_df["weight_pct"].apply(
+            lambda x: f"{x:.1f}%" if pd.notna(x) else "—"
+        )
+    if "shares" in display_df.columns:
+        display_df["shares"] = display_df["shares"].apply(
+            lambda x: f"{x:,.2f}" if pd.notna(x) else "—"
+        )
+
+    display_df = display_df.rename(columns={
+        "ticker": "Ticker", "account": "Account", "shares": "Shares",
+        "avg_cost": "Avg Cost", "current_price": "Price",
+        "market_value": "Market Value", "unrealized_pnl": "P&L",
+        "weight_pct": "Weight", "asset_class": "Asset Class",
+    })
+    display_cols = ["Ticker", "Account", "Shares", "Avg Cost", "Price",
+                    "Market Value", "P&L", "Weight", "Asset Class"]
+    display_cols = [c for c in display_cols if c in display_df.columns]
+
+    st.dataframe(
+        display_df[display_cols],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("---")
+
+    # --- Drift comparison ---
+    st.subheader("Asset Class Drift (Actual vs Target)")
+
+    alloc = load_latest_allocation()
+    if alloc:
+        target_weights = alloc.get("allocations", {})
+
+        # Aggregate actual holdings by asset class
+        raw_holdings = load_holdings()
+        actual_by_class = {}
+        if not raw_holdings.empty and "asset_class" in raw_holdings.columns:
+            for _, row in raw_holdings.iterrows():
+                cls = row.get("asset_class", "other")
+                mv = row.get("market_value", 0) or 0
+                actual_by_class[cls] = actual_by_class.get(cls, 0) + mv
+
+        DISPLAY_NAMES = {
+            "us_equities": "US Equities",
+            "intl_developed": "Intl Developed",
+            "em_equities": "EM Equities",
+            "energy_materials": "Energy / Materials",
+            "healthcare": "Healthcare",
+            "industry_sub": "Industry Sub-Sectors",
+            "thematic": "Thematic",
+            "cash_short_duration": "Cash / Short Duration",
+        }
+
+        drift_rows = []
+        for key, display in DISPLAY_NAMES.items():
+            target = target_weights.get(key, 0)
+            if isinstance(target, dict):
+                target = target.get("pct", 0) / 100.0
+            target = float(target or 0)
+
+            actual_dollars = actual_by_class.get(key, 0)
+            actual_pct = actual_dollars / total_val if total_val > 0 else 0
+
+            drift_bps = (actual_pct - target) * 10000
+
+            drift_rows.append({
+                "Category": display,
+                "Actual %": f"{actual_pct:.1%}",
+                "Target %": f"{target:.1%}",
+                "Drift (bps)": f"{drift_bps:+.0f}",
+                "Actual $": f"${actual_dollars:,.0f}",
+                "Target $": f"${target * total_val:,.0f}",
+                "Gap $": f"${actual_dollars - target * total_val:+,.0f}",
+                "_drift_abs": abs(drift_bps),
+            })
+
+        drift_df = pd.DataFrame(drift_rows)
+        max_drift = drift_df["_drift_abs"].max() if not drift_df.empty else 0
+
+        col_a, col_b = st.columns([1, 3])
+        with col_a:
+            if max_drift >= 200:
+                st.error(f"Max drift: {max_drift:.0f} bps")
+            elif max_drift >= 100:
+                st.warning(f"Max drift: {max_drift:.0f} bps")
+            else:
+                st.success(f"Max drift: {max_drift:.0f} bps")
+
+        display_drift = drift_df.drop(columns=["_drift_abs"])
+        st.dataframe(display_drift, use_container_width=True, hide_index=True)
+
+        # --- Drift bar chart ---
+        chart_data = []
+        for _, row in drift_df.iterrows():
+            chart_data.append({
+                "Category": row["Category"],
+                "Drift (bps)": float(row["Drift (bps)"].replace("+", "")),
+            })
+        if chart_data:
+            chart_df = pd.DataFrame(chart_data)
+            fig = px.bar(
+                chart_df, x="Category", y="Drift (bps)",
+                color="Drift (bps)",
+                color_continuous_scale=["#ff4444", "#888888", "#44bb44"],
+                color_continuous_midpoint=0,
+            )
+            fig.update_layout(
+                height=350,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font={"color": "#ccc"},
+                xaxis_tickangle=-45,
+                showlegend=False,
+            )
+            fig.add_hline(y=200, line_dash="dash", line_color="red",
+                         annotation_text="Rebalance threshold (+200bp)")
+            fig.add_hline(y=-200, line_dash="dash", line_color="red",
+                         annotation_text="Rebalance threshold (-200bp)")
+            st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.info("No target allocation available to compare against.")
+
+    st.markdown("---")
+
+    # --- Account breakdown ---
+    st.subheader("Account Breakdown")
+    raw_h = load_holdings()
+    if not raw_h.empty:
+        a1, a2 = st.columns(2)
+        with a1:
+            st.markdown("**Taxable Account**")
+            tax_h = raw_h[raw_h["account"] == "taxable"]
+            tax_invested = tax_h["market_value"].sum() or 0
+            st.metric("Invested", f"${tax_invested:,.0f}",
+                      f"${taxable_val - tax_invested:,.0f} available")
+            if not tax_h.empty:
+                for _, row in tax_h.iterrows():
+                    mv = row.get("market_value", 0) or 0
+                    pnl = row.get("unrealized_pnl", 0) or 0
+                    st.text(f"  {row['ticker']:<8s}  ${mv:>9,.0f}  P&L ${pnl:>+8,.0f}")
+
+        with a2:
+            st.markdown("**Roth IRA**")
+            roth_h = raw_h[raw_h["account"] == "roth_ira"]
+            roth_invested = roth_h["market_value"].sum() or 0
+            st.metric("Invested", f"${roth_invested:,.0f}",
+                      f"${roth_val - roth_invested:,.0f} available")
+            if not roth_h.empty:
+                for _, row in roth_h.iterrows():
+                    mv = row.get("market_value", 0) or 0
+                    pnl = row.get("unrealized_pnl", 0) or 0
+                    st.text(f"  {row['ticker']:<8s}  ${mv:>9,.0f}  P&L ${pnl:>+8,.0f}")
+
+    st.markdown("---")
+
+    # --- Trade history ---
+    with st.expander("Trade History"):
+        trades_df = load_trades()
+        if not trades_df.empty:
+            display_t = trades_df.copy()
+            display_t["price"] = display_t["price"].apply(lambda x: f"${x:,.2f}")
+            display_t["total_cost"] = display_t["total_cost"].apply(lambda x: f"${x:,.2f}")
+            display_t["shares"] = display_t["shares"].apply(lambda x: f"{x:,.2f}")
+            display_t = display_t.rename(columns={
+                "date": "Date", "ticker": "Ticker", "action": "Action",
+                "shares": "Shares", "price": "Price", "total_cost": "Total",
+                "account": "Account", "notes": "Notes",
+            })
+            st.dataframe(display_t, use_container_width=True, hide_index=True)
+        else:
+            st.info("No trades recorded yet.")
 
 
 # ===========================================================================
@@ -1310,10 +1559,12 @@ if page == PAGES[0]:
 elif page == PAGES[1]:
     page_portfolio_allocation()
 elif page == PAGES[2]:
-    page_signal_detail()
+    page_my_holdings()
 elif page == PAGES[3]:
-    page_stock_screener()
+    page_signal_detail()
 elif page == PAGES[4]:
-    page_alerts_log()
+    page_stock_screener()
 elif page == PAGES[5]:
+    page_alerts_log()
+elif page == PAGES[6]:
     page_backtester()
