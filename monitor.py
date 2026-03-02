@@ -25,6 +25,7 @@ Alert Types
 * ENTRY_WINDOW     — underweight > 300 bp + factor score top quartile
 * PANIC_PROTOCOL   — regime = Panic confirmed (staged exit sequence)
 * EXTENDED_DEFENSE — 60+ days in Defense/Panic without crisis confirmation
+* HOLDINGS_DRIFT   — actual holdings vs target allocation drift > 200 bp
 
 Dependencies: data_feeds, regime_detector, portfolio_optimizer,
               stock_screener, nlp_sentiment, plus delivery (Telegram,
@@ -62,6 +63,7 @@ _data_feeds = None
 _regime_detector = None
 _portfolio_optimizer = None
 _nlp_sentiment = None
+_holdings_tracker = None
 
 try:
     import data_feeds as _data_feeds
@@ -93,6 +95,12 @@ except ImportError as _e:
     # NLP is optional — only log at INFO level
     logging.getLogger("monitor").info(
         "nlp_sentiment not available — NLP scoring will be skipped (%s)", _e)
+
+try:
+    import holdings_tracker as _holdings_tracker
+except ImportError as _e:
+    logging.getLogger("monitor").info(
+        "holdings_tracker not available — holdings drift will not be checked (%s)", _e)
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -483,8 +491,16 @@ class AlertEngine:
                  prev_allocation: Optional[Dict],
                  new_allocation: Dict,
                  regime_changed: bool,
-                 consecutive_defensive_days: int) -> List[Dict]:
-        """Run all alert checks and return list of triggered alerts."""
+                 consecutive_defensive_days: int,
+                 holdings_data: Optional[Dict] = None) -> List[Dict]:
+        """Run all alert checks and return list of triggered alerts.
+
+        Parameters
+        ----------
+        holdings_data : dict from holdings_tracker.get_holdings_for_alerts()
+            If provided, enables HOLDINGS_DRIFT alerts comparing actual
+            portfolio weights to the target allocation.
+        """
         alerts: List[Dict] = []
         now = dt.datetime.now().isoformat()
 
@@ -576,6 +592,61 @@ class AlertEngine:
                     "data": {"days": consecutive_defensive_days,
                              "wedge_volume_pct": wv_pct,
                              "crisis_floor": self.whipsaw_floor},
+                })
+
+        # --- HOLDINGS DRIFT ALERT (actual vs target) ---
+        if holdings_data and holdings_data.get("has_holdings"):
+            actual_w = holdings_data.get("actual_weights", {})
+            target_w = new_allocation.get("allocations", {})
+            # Normalize target weights (handle nested dict format)
+            target_flat = {}
+            for k, v in target_w.items():
+                if isinstance(v, dict):
+                    target_flat[k] = v.get("pct", 0) / 100.0
+                elif isinstance(v, (int, float)):
+                    target_flat[k] = float(v)
+
+            # Compute max drift between actual holdings and target
+            all_classes = set(list(actual_w.keys()) + list(target_flat.keys()))
+            max_holdings_drift = 0.0
+            worst_class = ""
+            drift_details = []
+            for cls in all_classes:
+                actual = actual_w.get(cls, 0.0)
+                target = target_flat.get(cls, 0.0)
+                drift = abs(actual - target) * 10000
+                if drift > max_holdings_drift:
+                    max_holdings_drift = drift
+                    worst_class = cls
+                if drift >= 100:  # Only report >=100bp drifts
+                    direction = "over" if actual > target else "under"
+                    drift_details.append(
+                        f"{cls}: {direction}weight {drift:.0f}bp "
+                        f"(actual {actual:.1%} vs target {target:.1%})"
+                    )
+
+            deployment = holdings_data.get("deployment_pct", 0)
+
+            if max_holdings_drift >= self.rebalance_bps:
+                detail_str = "; ".join(drift_details[:5])
+                alerts.append({
+                    "type": "HOLDINGS_DRIFT",
+                    "severity": "HIGH",
+                    "timestamp": now,
+                    "message": (
+                        f"ACTUAL portfolio drifts {max_holdings_drift:.0f} bps "
+                        f"from target (threshold: {self.rebalance_bps} bps). "
+                        f"Worst: {worst_class}. "
+                        f"Deployed: {deployment:.1f}%. "
+                        f"Details: {detail_str}"
+                    ),
+                    "data": {
+                        "max_drift_bps": max_holdings_drift,
+                        "threshold_bps": self.rebalance_bps,
+                        "worst_class": worst_class,
+                        "deployment_pct": deployment,
+                        "drift_details": drift_details,
+                    },
                 })
 
         return alerts
@@ -794,6 +865,7 @@ def generate_executive_summary(
     nlp_signals: Optional[pd.DataFrame] = None,
     factor_signals: Optional[pd.DataFrame] = None,
     consecutive_defensive_days: int = 0,
+    holdings_summary: str = "",
 ) -> str:
     """
     Build the full human-readable Executive Summary.
@@ -918,6 +990,12 @@ def generate_executive_summary(
         lines.append("  No alerts today.")
     lines.append("")
 
+    # Holdings section
+    if holdings_summary:
+        lines.append("─" * 66)
+        lines.append(holdings_summary)
+        lines.append("")
+
     # Signal detail section
     lines.append("═" * 66)
     lines.append("SIGNAL DETAIL (for reference — no action needed to read this)")
@@ -1029,6 +1107,8 @@ def main():
             _regime_detector.DB_PATH = db_path
         if _portfolio_optimizer is not None:
             _portfolio_optimizer.DB_PATH = db_path
+        if _holdings_tracker is not None:
+            _holdings_tracker.DB_PATH = db_path
 
     cfg = load_config(config_path)
     conn = get_db(db_path)
@@ -1090,6 +1170,24 @@ def main():
         # Count consecutive defensive days
         defensive_days = count_consecutive_defensive_days(conn)
 
+        # Step 6b: Fetch actual holdings for drift comparison
+        holdings_data = None
+        holdings_summary = ""
+        if _holdings_tracker is not None:
+            try:
+                _holdings_tracker.init_holdings_tables(db_path)
+                _holdings_tracker.refresh_holdings(conn, cfg)
+                holdings_data = _holdings_tracker.get_holdings_for_alerts(conn, cfg)
+                holdings_summary = _holdings_tracker.get_holdings_summary(conn, cfg)
+                if holdings_data and holdings_data.get("has_holdings"):
+                    logger.info("  Holdings: %d%% deployed, max drift %d bps",
+                                int(holdings_data.get("deployment_pct", 0)),
+                                int(holdings_data.get("max_drift_bps", 0)))
+                else:
+                    logger.info("  Holdings: no trades recorded yet.")
+            except Exception as exc:
+                logger.warning("Holdings check failed (non-fatal): %s", exc)
+
         # Step 7: Alert evaluation
         logger.info("Step 7: Alert evaluation...")
         engine = AlertEngine(cfg)
@@ -1099,6 +1197,7 @@ def main():
             new_allocation=allocation,
             regime_changed=regime_changed,
             consecutive_defensive_days=defensive_days,
+            holdings_data=holdings_data,
         )
         logger.info("  Alerts triggered: %d", len(alerts))
         for a in alerts:
@@ -1115,6 +1214,7 @@ def main():
             nlp_signals=nlp_signals,
             factor_signals=factor_signals,
             consecutive_defensive_days=defensive_days,
+            holdings_summary=holdings_summary,
         )
         print(report)
 
