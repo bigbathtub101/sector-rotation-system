@@ -1,7 +1,10 @@
 # ============================================================================
 # Sector Rotation System — Daily Monitor
 # ============================================================================
-# Runs monitor.py every trading day at 4:30 PM ET (20:30 UTC).
+# Runs monitor.py every trading day at 4:30 PM ET (21:30 UTC during EDT,
+# 20:30 UTC during EST).  Using 21:30 UTC which covers EDT; during EST
+# the run happens at 4:30 PM ET either way (close enough).
+#
 # On any alert: sends email via Gmail SMTP, Telegram message, and
 # writes daily allocation row to Google Sheets.
 # Full daily report stored as a GitHub Actions artifact (90-day retention).
@@ -19,8 +22,10 @@ name: Daily Sector Rotation Monitor
 
 on:
   schedule:
-    # 4:30 PM ET = 20:30 UTC (EST) / 20:30 UTC year-round (close enough for daily)
-    - cron: "30 20 * * 1-5"
+    # 4:30 PM ET ≈ 21:30 UTC (EDT) / 20:30 UTC (EST)
+    # Using 21:30 UTC to cover EDT; during EST it fires at 3:30 PM ET
+    # which is still after market close (acceptable).
+    - cron: "30 21 * * 1-5"
   workflow_dispatch:          # Allow manual trigger from GitHub UI
 
 permissions:
@@ -29,7 +34,7 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 10       # Hard cap; typical run is 2–4 minutes
+    timeout-minutes: 15       # Hard cap; typical run is 2–4 minutes
 
     steps:
       # ------------------------------------------------------------------
@@ -39,7 +44,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------------
-      # 2. Set up Python
+      # 2. Set up Python with pip cache
       # ------------------------------------------------------------------
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -48,15 +53,26 @@ jobs:
           cache: "pip"
 
       # ------------------------------------------------------------------
-      # 3. Install dependencies
+      # 3. Install CI dependencies (lightweight — no torch/streamlit)
       # ------------------------------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-ci.txt
 
       # ------------------------------------------------------------------
-      # 4. Skip on US market holidays (basic check)
+      # 4. Restore DB from cache (persists state across daily runs)
+      # ------------------------------------------------------------------
+      - name: Restore database cache
+        uses: actions/cache@v4
+        with:
+          path: rotation_system.db
+          key: rotation-db-${{ github.run_id }}
+          restore-keys: |
+            rotation-db-
+
+      # ------------------------------------------------------------------
+      # 5. Skip on US market holidays (basic check)
       # ------------------------------------------------------------------
       - name: Check if market is open
         id: market_check
@@ -64,33 +80,25 @@ jobs:
           python -c "
           import datetime as dt
           today = dt.date.today()
-          # US federal holidays that always close the market
-          # (simplified — does not cover early closes)
           FIXED_HOLIDAYS = {
               (1, 1),   # New Year's Day
               (7, 4),   # Independence Day
               (12, 25), # Christmas
           }
-          # Floating holidays approximated by month + weekday logic
           month, day, weekday = today.month, today.day, today.weekday()
           is_holiday = False
           if (month, day) in FIXED_HOLIDAYS:
               is_holiday = True
-          # MLK Day: 3rd Monday of January
           elif month == 1 and weekday == 0 and 15 <= day <= 21:
-              is_holiday = True
-          # Presidents Day: 3rd Monday of February
+              is_holiday = True  # MLK Day
           elif month == 2 and weekday == 0 and 15 <= day <= 21:
-              is_holiday = True
-          # Memorial Day: last Monday of May
+              is_holiday = True  # Presidents Day
           elif month == 5 and weekday == 0 and day >= 25:
-              is_holiday = True
-          # Labor Day: 1st Monday of September
+              is_holiday = True  # Memorial Day
           elif month == 9 and weekday == 0 and day <= 7:
-              is_holiday = True
-          # Thanksgiving: 4th Thursday of November
+              is_holiday = True  # Labor Day
           elif month == 11 and weekday == 3 and 22 <= day <= 28:
-              is_holiday = True
+              is_holiday = True  # Thanksgiving
           if is_holiday:
               print('skip=true')
           else:
@@ -98,7 +106,7 @@ jobs:
           " >> $GITHUB_OUTPUT
 
       # ------------------------------------------------------------------
-      # 5. Run the daily monitor
+      # 6. Run the daily monitor (--run-daily = live data + delivery)
       # ------------------------------------------------------------------
       - name: Run monitor.py
         if: steps.market_check.outputs.skip != 'true'
@@ -114,20 +122,22 @@ jobs:
           echo "MONITOR_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
 
       # ------------------------------------------------------------------
-      # 6. Upload daily report as artifact (90-day retention, free)
+      # 7. Upload daily report as artifact (90-day retention, free)
       # ------------------------------------------------------------------
       - name: Upload daily report
-        if: steps.market_check.outputs.skip != 'true'
+        if: steps.market_check.outputs.skip != 'true' && always()
         uses: actions/upload-artifact@v4
         with:
           name: daily-report-${{ github.run_id }}
           path: |
             daily_report.txt
+            alerts.json
+            alerts_history.csv
             rotation_system.db
           retention-days: 90
 
       # ------------------------------------------------------------------
-      # 7. Send failure notification via Telegram on error
+      # 8. Send failure notification via Telegram on error
       # ------------------------------------------------------------------
       - name: Notify on failure
         if: failure() && steps.market_check.outputs.skip != 'true'
@@ -147,22 +157,25 @@ jobs:
           "
 
       # ------------------------------------------------------------------
-      # 8. Send failure notification via email on error
+      # 9. Send failure notification via email on error
       # ------------------------------------------------------------------
       - name: Email on failure
         if: failure() && steps.market_check.outputs.skip != 'true'
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.GMAIL_USERNAME }}
-          password: ${{ secrets.GMAIL_PASSWORD }}
-          subject: "⚠️ Sector Rotation Monitor FAILED — ${{ github.run_id }}"
-          body: |
-            The daily sector rotation monitor run failed.
-            
-            Check the run at:
-            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          to: ${{ secrets.GMAIL_USERNAME }}
-          from: ${{ secrets.GMAIL_USERNAME }}
+        env:
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: |
+          python -c "
+          import os, smtplib
+          from email.mime.text import MIMEText
+          username = os.environ.get('GMAIL_USERNAME', '')
+          password = os.environ.get('GMAIL_PASSWORD', '')
+          if username and password:
+              msg = MIMEText('The daily sector rotation monitor run failed.\n\nCheck: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}')
+              msg['Subject'] = '⚠️ Sector Rotation Monitor FAILED'
+              msg['From'] = username
+              msg['To'] = username
+              with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                  server.login(username, password)
+                  server.send_message(msg)
+          "

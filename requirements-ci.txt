@@ -1,0 +1,28 @@
+# ============================================================================
+# Sector Rotation System — CI Dependencies (GitHub Actions)
+# ============================================================================
+# Lightweight subset of requirements.txt for the daily monitor cron job.
+# Excludes heavy packages only needed for local use:
+#   - torch / transformers  (NLP — runs in mock mode on CI)
+#   - streamlit / plotly    (dashboard — only runs locally or on Streamlit Cloud)
+#   - pytest                (testing — only needed in dev)
+# ============================================================================
+
+# --- Core Data & Math ---
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+PyYAML>=6.0
+
+# --- Market Data ---
+yfinance>=0.2.28
+
+# --- Portfolio Optimization ---
+pyportfolioopt>=1.5.5
+
+# --- Web Requests (FRED, SEC EDGAR) ---
+requests>=2.28.0
+
+# --- Google Sheets Integration ---
+gspread>=5.10.0
+google-auth>=2.20.0
