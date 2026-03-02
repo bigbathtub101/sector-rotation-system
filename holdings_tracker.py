@@ -112,7 +112,7 @@ def build_ticker_to_asset_class(cfg: dict) -> Dict[str, str]:
 
     # Geographic ETFs — split into developed vs EM
     developed_set = {"VGK", "EWJ", "EWY", "EWT"}
-    em_set = {"EEM", "INDA", "EWZ", "FXI", "KWEB", "VWO"}
+    em_set = {"EEM", "INDA", "EWZ", "FXI", "MCHI", "KWEB", "VWO", "IEMG"}
     for t in tickers_cfg.get("geographic_etfs", []):
         if t in developed_set:
             mapping[t] = "intl_developed"

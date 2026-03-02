@@ -109,17 +109,19 @@ tickers:
     - AIQ   # AI & Technology (Global X)
 
   # === GEOGRAPHIC ETFs ===
+  # Revised: dropped EEM (redundant with VWO, 0.72% fee), replaced FXI
+  # (concentrated state-owned Chinese large-caps, 0.73% fee) with MCHI
+  # (broader China, 0.19% fee, includes tech/consumer)
   geographic_etfs:
-    - EEM   # Emerging Markets
     - INDA  # India
     - EWZ   # Brazil
     - VGK   # Europe
-    - FXI   # China Large-Cap
+    - MCHI  # iShares MSCI China (replaced FXI — broader, cheaper)
     - EWY   # South Korea
     - EWT   # Taiwan
     - EWJ   # Japan
     - KWEB  # China Internet (KraneShares)
-    - VWO   # Vanguard FTSE Emerging Markets (broader than EEM)
+    - VWO   # Vanguard FTSE Emerging Markets (primary broad EM fund)
 
   # === FACTOR ETFs ===
   factor_etfs:
@@ -260,6 +262,83 @@ tickers:
     semiconductors_min_m: 2000  # $2B minimum
     energy_transition_min_m: 500
     fintech_min_m: 1000
+
+# --------------------------------------------------------------------------
+# ETF STRUCTURAL QUALITY (Phase 11 Enhancement)
+# --------------------------------------------------------------------------
+# Controls expense ratio penalties, overlap detection, and ETF quality gates.
+# The optimizer penalizes ETFs with high expense ratios and detects overlap
+# groups to prevent double-counting exposure.
+etf_quality:
+  # Maximum acceptable expense ratio (bps). ETFs above this are flagged.
+  max_expense_ratio_bps: 50      # 0.50% — anything above gets penalized
+
+  # Expense ratio penalty: weight is multiplied by (1 - penalty_factor * expense_ratio)
+  # At 0.73% expense ratio with factor=2.0: penalty = 1 - 2.0*0.0073 = 0.985 (1.5% haircut)
+  expense_penalty_factor: 2.0
+
+  # Known expense ratios (bps). Used when live data unavailable.
+  # Source: fund prospectuses as of 2026-02
+  expense_ratios_bps:
+    # US Sector ETFs (all SPDR, 0.09%)
+    XLK: 9
+    XLF: 9
+    XLI: 9
+    XLU: 9
+    XLP: 9
+    XLY: 9
+    XLC: 9
+    XLE: 9
+    XLV: 9
+    XLRE: 9
+    XLB: 9
+    # Geographic ETFs
+    VGK: 7       # Vanguard Europe — 0.07%
+    EWJ: 50      # iShares Japan — 0.50%
+    EWY: 57      # iShares S. Korea — 0.57%
+    EWT: 57      # iShares Taiwan — 0.57%
+    EWZ: 58      # iShares Brazil — 0.58%
+    MCHI: 59     # iShares MSCI China — 0.59%
+    VWO: 8       # Vanguard Emerging Markets — 0.08%
+    INDA: 65     # iShares India — 0.65%
+    KWEB: 69     # KraneShares China Internet — 0.69%
+    EEM: 72      # iShares EM (REMOVED — listed for reference) — 0.72%
+    FXI: 73      # iShares China LC (REMOVED — listed for reference) — 0.73%
+    # Broad EM alternatives
+    IEMG: 9      # iShares Core EM — 0.09% (alternative to VWO)
+    # Thematic ETFs
+    AIQ: 68      # Global X AI — 0.68%
+    HACK: 60     # ETFMG Cybersecurity — 0.60%
+    BIL: 14      # SPDR 1-3 Month T-Bill — 0.14%
+
+  # Overlap groups: ETFs that substantially overlap in holdings.
+  # Within each group, the optimizer will prefer the cheapest member
+  # and penalize redundant positions.
+  overlap_groups:
+    broad_em:
+      members: [VWO, EEM, IEMG]
+      preferred: VWO                # Cheapest broad EM fund
+      overlap_pct: 85               # ~85% holdings overlap
+    china:
+      members: [MCHI, FXI, KWEB]
+      preferred: MCHI               # Broadest, cheapest
+      overlap_pct: 40               # Partial overlap (KWEB is internet-only)
+    taiwan_in_em:
+      members: [EWT, VWO]
+      note: "EWT is ~18% of VWO. Standalone EWT is an intentional overweight."
+      overlap_pct: 18
+      max_combined_weight_pct: 8    # Cap combined Taiwan exposure
+    korea_in_em:
+      members: [EWY, VWO]
+      note: "EWY is NOT in VWO (FTSE excludes S. Korea). EWY adds unique exposure."
+      overlap_pct: 0                # No overlap — VWO uses FTSE index
+
+  # ETF concentration limits: max single-country weight (prevents
+  # one geographic bet from dominating the intl sleeve)
+  max_single_country_pct: 8.0     # No single country ETF > 8% of portfolio
+  max_single_region_pct: 15.0     # No single multi-country ETF (VGK, VWO) > 15%
+  max_em_total_pct: 20.0          # Total EM exposure cap
+  max_intl_total_pct: 35.0        # Total international cap (developed + EM)
 
 # --------------------------------------------------------------------------
 # FRED MACROECONOMIC SERIES
