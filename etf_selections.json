@@ -1,0 +1,431 @@
+{
+  "timestamp": "2026-03-02T19:41:29.812053Z",
+  "version": "1.1",
+  "selections": {
+    "us_technology": {
+      "selected": "FTEC",
+      "asset_class": "us_equities",
+      "candidates": {
+        "FTEC": {
+          "score": 0.072152,
+          "expense_ratio_bps": 8,
+          "aum_millions": 16149.0
+        },
+        "VGT": {
+          "score": 0.078385,
+          "expense_ratio_bps": 9,
+          "aum_millions": 130278.7
+        },
+        "XLK": {
+          "score": 0.078538,
+          "expense_ratio_bps": 9,
+          "aum_millions": 91643.2
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$16149M) \u2014 beat VGT (9bps)"
+    },
+    "us_healthcare": {
+      "selected": "FHLC",
+      "asset_class": "healthcare",
+      "candidates": {
+        "FHLC": {
+          "score": 0.07011,
+          "expense_ratio_bps": 8,
+          "aum_millions": 2827.5
+        },
+        "VHT": {
+          "score": 0.082348,
+          "expense_ratio_bps": 10,
+          "aum_millions": 19811.8
+        },
+        "XLV": {
+          "score": 0.074335,
+          "expense_ratio_bps": 9,
+          "aum_millions": 40979.5
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$2828M) \u2014 beat XLV (9bps)"
+    },
+    "us_financials": {
+      "selected": "FNCL",
+      "asset_class": "us_equities",
+      "candidates": {
+        "FNCL": {
+          "score": 0.07053,
+          "expense_ratio_bps": 8,
+          "aum_millions": 2409.1
+        },
+        "VFH": {
+          "score": 0.082613,
+          "expense_ratio_bps": 10,
+          "aum_millions": 14639.0
+        },
+        "XLF": {
+          "score": 0.074162,
+          "expense_ratio_bps": 9,
+          "aum_millions": 55285.9
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$2409M) \u2014 beat XLF (9bps)"
+    },
+    "us_industrials": {
+      "selected": "FIDU",
+      "asset_class": "us_equities",
+      "candidates": {
+        "FIDU": {
+          "score": 0.073239,
+          "expense_ratio_bps": 8,
+          "aum_millions": 1809.3
+        },
+        "VIS": {
+          "score": 0.08551,
+          "expense_ratio_bps": 10,
+          "aum_millions": 7468.2
+        },
+        "XLI": {
+          "score": 0.076734,
+          "expense_ratio_bps": 9,
+          "aum_millions": 27983.4
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$1809M) \u2014 beat XLI (9bps)"
+    },
+    "us_consumer_disc": {
+      "selected": "FDIS",
+      "asset_class": "us_equities",
+      "candidates": {
+        "FDIS": {
+          "score": 0.07572,
+          "expense_ratio_bps": 8,
+          "aum_millions": 1842.6
+        },
+        "VCR": {
+          "score": 0.088079,
+          "expense_ratio_bps": 10,
+          "aum_millions": 6989.0
+        },
+        "XLY": {
+          "score": 0.079331,
+          "expense_ratio_bps": 9,
+          "aum_millions": 23873.1
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$1843M) \u2014 beat XLY (9bps)"
+    },
+    "us_consumer_staples": {
+      "selected": "FSTA",
+      "asset_class": "us_equities",
+      "candidates": {
+        "FSTA": {
+          "score": 0.093398,
+          "expense_ratio_bps": 8,
+          "aum_millions": 1389.6
+        },
+        "VDC": {
+          "score": 0.105428,
+          "expense_ratio_bps": 10,
+          "aum_millions": 9045.7
+        },
+        "XLP": {
+          "score": 0.09733,
+          "expense_ratio_bps": 9,
+          "aum_millions": 16153.4
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$1390M) \u2014 beat XLP (9bps)"
+    },
+    "us_energy": {
+      "selected": "FENY",
+      "asset_class": "energy_materials",
+      "candidates": {
+        "FENY": {
+          "score": 0.093398,
+          "expense_ratio_bps": 8,
+          "aum_millions": 1511.1
+        },
+        "VDE": {
+          "score": 0.105304,
+          "expense_ratio_bps": 10,
+          "aum_millions": 10070.0
+        },
+        "XLE": {
+          "score": 0.09678,
+          "expense_ratio_bps": 9,
+          "aum_millions": 32989.7
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$1511M) \u2014 beat XLE (9bps)"
+    },
+    "us_materials": {
+      "selected": "FMAT",
+      "asset_class": "energy_materials",
+      "candidates": {
+        "FMAT": {
+          "score": 0.093398,
+          "expense_ratio_bps": 8,
+          "aum_millions": 507.3
+        },
+        "VAW": {
+          "score": 0.106516,
+          "expense_ratio_bps": 10,
+          "aum_millions": 4324.1
+        },
+        "XLB": {
+          "score": 0.098445,
+          "expense_ratio_bps": 9,
+          "aum_millions": 6124.7
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$507M) \u2014 beat XLB (9bps)"
+    },
+    "us_utilities": {
+      "selected": "FUTY",
+      "asset_class": "us_equities",
+      "candidates": {
+        "FUTY": {
+          "score": 0.098811,
+          "expense_ratio_bps": 8,
+          "aum_millions": 2220.7
+        },
+        "VPU": {
+          "score": 0.111049,
+          "expense_ratio_bps": 10,
+          "aum_millions": 10023.4
+        },
+        "XLU": {
+          "score": 0.102804,
+          "expense_ratio_bps": 9,
+          "aum_millions": 22197.6
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$2221M) \u2014 beat XLU (9bps)"
+    },
+    "us_real_estate": {
+      "selected": "FREL",
+      "asset_class": "us_equities",
+      "candidates": {
+        "FREL": {
+          "score": 0.086873,
+          "expense_ratio_bps": 8,
+          "aum_millions": 1374.2
+        },
+        "VNQ": {
+          "score": 0.119853,
+          "expense_ratio_bps": 13,
+          "aum_millions": 65742.1
+        },
+        "XLRE": {
+          "score": 0.091691,
+          "expense_ratio_bps": 9,
+          "aum_millions": 7204.8
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$1374M) \u2014 beat XLRE (9bps)"
+    },
+    "us_communication": {
+      "selected": "FCOM",
+      "asset_class": "us_equities",
+      "candidates": {
+        "FCOM": {
+          "score": 0.093398,
+          "expense_ratio_bps": 8,
+          "aum_millions": 1822.3
+        },
+        "VOX": {
+          "score": 0.105819,
+          "expense_ratio_bps": 10,
+          "aum_millions": 6682.3
+        },
+        "XLC": {
+          "score": 0.096893,
+          "expense_ratio_bps": 9,
+          "aum_millions": 27958.8
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$1822M) \u2014 beat XLC (9bps)"
+    },
+    "india": {
+      "selected": "FLIN",
+      "asset_class": "em_equities",
+      "candidates": {
+        "FLIN": {
+          "score": 0.163777,
+          "expense_ratio_bps": 19,
+          "aum_millions": 2812.7
+        },
+        "INDA": {
+          "score": 0.506768,
+          "expense_ratio_bps": 65,
+          "aum_millions": 9099.6
+        },
+        "INDY": {
+          "score": 0.689744,
+          "expense_ratio_bps": 89,
+          "aum_millions": 613.2
+        }
+      },
+      "reason": "Lowest cost score (ER=19bps, AUM=$2813M) \u2014 beat INDA (65bps)"
+    },
+    "brazil": {
+      "selected": "FLBR",
+      "asset_class": "em_equities",
+      "candidates": {
+        "FLBR": {
+          "score": 0.179488,
+          "expense_ratio_bps": 19,
+          "aum_millions": 318.7
+        },
+        "EWZ": {
+          "score": 0.469059,
+          "expense_ratio_bps": 58,
+          "aum_millions": 8748.3
+        }
+      },
+      "reason": "Lowest cost score (ER=19bps, AUM=$319M) \u2014 beat EWZ (58bps)"
+    },
+    "japan": {
+      "selected": "FLJP",
+      "asset_class": "intl_developed",
+      "candidates": {
+        "FLJP": {
+          "score": 0.082356,
+          "expense_ratio_bps": 9,
+          "aum_millions": 2699.4
+        },
+        "EWJ": {
+          "score": 0.387123,
+          "expense_ratio_bps": 50,
+          "aum_millions": 16692.9
+        },
+        "DXJ": {
+          "score": 0.373353,
+          "expense_ratio_bps": 48,
+          "aum_millions": 5780.5
+        }
+      },
+      "reason": "Lowest cost score (ER=9bps, AUM=$2699M) \u2014 beat DXJ (48bps)"
+    },
+    "europe": {
+      "selected": "VGK",
+      "asset_class": "intl_developed",
+      "candidates": {
+        "VGK": {
+          "score": 0.055771,
+          "expense_ratio_bps": 7,
+          "aum_millions": 39261.2
+        },
+        "FLEU": {
+          "score": 0.17538,
+          "expense_ratio_bps": 9,
+          "aum_millions": 62.4
+        },
+        "FEZ": {
+          "score": 0.222749,
+          "expense_ratio_bps": 29,
+          "aum_millions": 5368.2
+        }
+      },
+      "reason": "Lowest cost score (ER=7bps, AUM=$39261M) \u2014 beat FLEU (9bps)"
+    },
+    "china": {
+      "selected": "FLCH",
+      "asset_class": "em_equities",
+      "candidates": {
+        "FLCH": {
+          "score": 0.164744,
+          "expense_ratio_bps": 19,
+          "aum_millions": 289.6
+        },
+        "MCHI": {
+          "score": 0.461936,
+          "expense_ratio_bps": 59,
+          "aum_millions": 7936.1
+        },
+        "FXI": {
+          "score": 0.567176,
+          "expense_ratio_bps": 73,
+          "aum_millions": 6632.8
+        }
+      },
+      "reason": "Lowest cost score (ER=19bps, AUM=$290M) \u2014 beat MCHI (59bps)"
+    },
+    "south_korea": {
+      "selected": "FLKR",
+      "asset_class": "em_equities",
+      "candidates": {
+        "FLKR": {
+          "score": 0.100898,
+          "expense_ratio_bps": 9,
+          "aum_millions": 362.9
+        },
+        "EWY": {
+          "score": 0.457599,
+          "expense_ratio_bps": 57,
+          "aum_millions": 12199.9
+        }
+      },
+      "reason": "Lowest cost score (ER=9bps, AUM=$363M) \u2014 beat EWY (57bps)"
+    },
+    "taiwan": {
+      "selected": "FLTW",
+      "asset_class": "em_equities",
+      "candidates": {
+        "FLTW": {
+          "score": 0.177593,
+          "expense_ratio_bps": 19,
+          "aum_millions": 730.0
+        },
+        "EWT": {
+          "score": 0.459827,
+          "expense_ratio_bps": 57,
+          "aum_millions": 7680.6
+        }
+      },
+      "reason": "Lowest cost score (ER=19bps, AUM=$730M) \u2014 beat EWT (57bps)"
+    },
+    "broad_em": {
+      "selected": "VWO",
+      "asset_class": "em_equities",
+      "candidates": {
+        "VWO": {
+          "score": 0.062604,
+          "expense_ratio_bps": 8,
+          "aum_millions": 151758.5
+        },
+        "IEMG": {
+          "score": 0.07014,
+          "expense_ratio_bps": 9,
+          "aum_millions": 138763.3
+        },
+        "EEM": {
+          "score": 0.543522,
+          "expense_ratio_bps": 72,
+          "aum_millions": 26953.2
+        }
+      },
+      "reason": "Lowest cost score (ER=8bps, AUM=$151758M) \u2014 beat IEMG (9bps)"
+    },
+    "cash_tbill": {
+      "selected": "SGOV",
+      "asset_class": "cash_short_duration",
+      "candidates": {
+        "SGOV": {
+          "score": 0.077237,
+          "expense_ratio_bps": 3,
+          "aum_millions": 70885.7
+        },
+        "BIL": {
+          "score": 0.160022,
+          "expense_ratio_bps": 14,
+          "aum_millions": 42207.8
+        },
+        "SHV": {
+          "score": 0.168046,
+          "expense_ratio_bps": 15,
+          "aum_millions": 19993.5
+        }
+      },
+      "reason": "Lowest cost score (ER=3bps, AUM=$70886M) \u2014 beat BIL (14bps)"
+    }
+  }
+}

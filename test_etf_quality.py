@@ -222,6 +222,114 @@ check("VGK maps to intl_developed", _get_asset_class("VGK") == "intl_developed",
       f"VGK → {_get_asset_class('VGK')}")
 
 # ────────────────────────────────────────────────────────────────
+# Test 11: XLP offense-excluded (weight zeroed, redistributed)
+# ────────────────────────────────────────────────────────────────
+print("\n── Test 11: XLP offense exclusion ──")
+weights_xlp = {
+    "XLK": 0.30, "XLP": 0.10, "XLI": 0.20,
+    "VGK": 0.10, "BIL": 0.30
+}
+result_xlp = apply_etf_quality_filter(weights_xlp, cfg)
+check("XLP zeroed by offense_exclude",
+      result_xlp.get("XLP", 0) < 0.001,
+      f"XLP={result_xlp.get('XLP', 0)*100:.2f}%")
+check("XLP weight redistributed to equities (XLK grew)",
+      result_xlp.get("XLK", 0) > 0.30,
+      f"XLK={result_xlp.get('XLK', 0)*100:.2f}% (was 30%)")
+check("BIL unchanged after XLP redistribution",
+      result_xlp.get("BIL", 0) <= 0.31,
+      f"BIL={result_xlp.get('BIL', 0)*100:.2f}%")
+
+# ────────────────────────────────────────────────────────────────
+# Test 12: XLU per-ticker cap (6%)
+# ────────────────────────────────────────────────────────────────
+print("\n── Test 12: XLU per-ticker cap ──")
+xlu_cap = eq.get("per_ticker_cap_pct", {}).get("XLU", 100) / 100.0
+weights_xlu = {
+    "XLK": 0.30, "XLU": 0.15, "XLI": 0.20,
+    "VGK": 0.10, "BIL": 0.25
+}
+result_xlu = apply_etf_quality_filter(weights_xlu, cfg)
+check(f"XLU capped at <= {xlu_cap*100:.0f}%",
+      result_xlu.get("XLU", 0) <= xlu_cap + 0.005,
+      f"XLU={result_xlu.get('XLU', 0)*100:.2f}% (was 15%, cap={xlu_cap*100:.0f}%)")
+check("XLU excess redistributed to equities",
+      result_xlu.get("XLK", 0) > 0.30 or result_xlu.get("XLI", 0) > 0.20,
+      f"XLK={result_xlu.get('XLK', 0)*100:.2f}%, XLI={result_xlu.get('XLI', 0)*100:.2f}%")
+
+# ────────────────────────────────────────────────────────────────
+# Test 13: Dividend-yield tax location routing
+# ────────────────────────────────────────────────────────────────
+print("\n── Test 13: Dividend-yield tax location routing ──")
+from portfolio_optimizer import allocate_dollars
+
+# Build a portfolio with high-div and growth sectors
+weights_tax = {
+    "XLU": 0.06,   # High dividend → should go Roth
+    "XLP": 0.05,   # High dividend → should go Roth
+    "XLI": 0.10,   # Growth → should go Taxable
+    "XLK": 0.15,   # Growth → should go Taxable
+    "XLC": 0.08,   # Growth → should go Taxable
+    "VGK": 0.10,   # Geographic → should go Taxable
+    "BIL": 0.05,   # Cash → Taxable
+    "AFRM": 0.10,  # Watchlist → should go Roth
+    "XLV": 0.15,   # No explicit routing → default
+    "VWO": 0.06,   # Geographic → Taxable
+    "XLY": 0.10,   # Growth → should go Taxable
+}
+alloc_result = allocate_dollars(weights_tax, cfg)
+
+# XLU should be in Roth (high-dividend sector)
+check("XLU → Roth (high-dividend)",
+      alloc_result.get("XLU", {}).get("roth_dollars", 0) > 0,
+      f"XLU: account={alloc_result.get('XLU', {}).get('account', 'N/A')}, "
+      f"reason={alloc_result.get('XLU', {}).get('reason', 'N/A')}")
+
+# XLP should be in Roth (high-dividend sector)
+check("XLP → Roth (high-dividend)",
+      alloc_result.get("XLP", {}).get("roth_dollars", 0) > 0,
+      f"XLP: account={alloc_result.get('XLP', {}).get('account', 'N/A')}, "
+      f"reason={alloc_result.get('XLP', {}).get('reason', 'N/A')}")
+
+# XLI should be in Taxable (growth sector)
+check("XLI → Taxable (growth sector)",
+      alloc_result.get("XLI", {}).get("taxable_dollars", 0) > 0,
+      f"XLI: account={alloc_result.get('XLI', {}).get('account', 'N/A')}, "
+      f"reason={alloc_result.get('XLI', {}).get('reason', 'N/A')}")
+
+# XLK should be in Taxable (growth sector)
+check("XLK → Taxable (growth sector)",
+      alloc_result.get("XLK", {}).get("taxable_dollars", 0) > 0,
+      f"XLK: account={alloc_result.get('XLK', {}).get('account', 'N/A')}, "
+      f"reason={alloc_result.get('XLK', {}).get('reason', 'N/A')}")
+
+# VGK should be in Taxable (geographic, foreign tax credit)
+check("VGK → Taxable (geographic)",
+      alloc_result.get("VGK", {}).get("taxable_dollars", 0) > 0,
+      f"VGK: account={alloc_result.get('VGK', {}).get('account', 'N/A')}")
+
+# AFRM should be in Roth (watchlist stock)
+check("AFRM → Roth (watchlist)",
+      alloc_result.get("AFRM", {}).get("roth_dollars", 0) > 0,
+      f"AFRM: account={alloc_result.get('AFRM', {}).get('account', 'N/A')}")
+
+# ────────────────────────────────────────────────────────────────
+# Test 14: Config sanity — high_dividend_sectors / growth_sectors present
+# ────────────────────────────────────────────────────────────────
+print("\n── Test 14: Config sanity checks ──")
+tl = cfg.get("tax_location", {})
+high_div = tl.get("high_dividend_sectors", [])
+growth = tl.get("growth_sectors", [])
+check("high_dividend_sectors defined", len(high_div) >= 2, f"{high_div}")
+check("growth_sectors defined", len(growth) >= 4, f"{growth}")
+check("XLU in high_dividend_sectors", "XLU" in high_div)
+check("XLP in high_dividend_sectors", "XLP" in high_div)
+check("XLI in growth_sectors", "XLI" in growth)
+check("XLK in growth_sectors", "XLK" in growth)
+check("per_ticker_cap_pct.XLU defined", "XLU" in eq.get("per_ticker_cap_pct", {}),
+      f"cap={eq.get('per_ticker_cap_pct', {}).get('XLU', 'N/A')}%")
+check("offense_exclude has XLP", "XLP" in eq.get("offense_exclude", []))
+# ────────────────────────────────────────────────────────────────
 # Summary
 # ────────────────────────────────────────────────────────────────
 print("\n" + "=" * 65)
