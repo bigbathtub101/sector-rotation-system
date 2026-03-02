@@ -33,6 +33,7 @@ tax_location:
     - "biotech_smallcap"                # Highest volatility and rebalancing frequency
     - "momentum_tilt_only"              # Flagged as momentum, not fundamental overweight
     - "thematic_etf"                    # Thematic ETFs (ARKK, BOTZ, etc.) — high turnover
+    - "high_dividend_sector"            # XLU, XLP — high dividend yield generates taxable income
   taxable:
     - "broad_etf_longterm"              # Broad ETFs held > 12 months
     - "geographic_etf"                  # EEM, INDA, EWZ, VGK — foreign tax credit eligible
@@ -40,7 +41,22 @@ tax_location:
     - "energy_materials_etf"            # Lower turnover, structural diversifier
     - "industry_etf"                    # Sub-sector industry ETFs — moderate turnover
     - "tax_loss_harvest_candidate"      # Positions with TLH opportunity
+    - "growth_sector"                   # XLI, XLK, XLC, XLY — cap appreciation, low dividend yield
   split_threshold: 10000               # Never split a position across accounts unless > $10k
+
+  # Dividend-yield tax location routing:
+  # High-dividend US sector ETFs → Roth (dividends taxed as ordinary income in taxable)
+  # Growth/appreciation US sector ETFs → Taxable (long-term cap gains taxed favorably)
+  high_dividend_sectors:               # TTM yield > ~2.5% → Roth
+    - XLU                              # Utilities ~2.8% yield
+    - XLP                              # Consumer Staples ~2.6% yield
+    - XLRE                             # Real Estate ~3.2% yield
+  growth_sectors:                      # TTM yield < ~1.5% → Taxable
+    - XLI                              # Industrials ~1.4% yield
+    - XLK                              # Technology ~0.6% yield
+    - XLC                              # Communication ~0.8% yield
+    - XLY                              # Consumer Disc ~0.9% yield
+    - XLF                              # Financials ~1.3% yield
 
 # --------------------------------------------------------------------------
 # TICKER UNIVERSES
@@ -280,7 +296,7 @@ etf_quality:
   # Known expense ratios (bps). Used when live data unavailable.
   # Source: fund prospectuses as of 2026-02
   expense_ratios_bps:
-    # US Sector ETFs (all SPDR, 0.09%)
+    # US Sector ETFs — SPDR series (0.09%)
     XLK: 9
     XLF: 9
     XLI: 9
@@ -292,7 +308,38 @@ etf_quality:
     XLV: 9
     XLRE: 9
     XLB: 9
-    # Geographic ETFs
+    # US Sector ETFs — Fidelity MSCI series (0.084%)
+    FTEC: 8
+    FHLC: 8
+    FNCL: 8
+    FIDU: 8
+    FDIS: 8
+    FSTA: 8
+    FENY: 8
+    FMAT: 8
+    FUTY: 8
+    FREL: 8
+    FCOM: 8
+    # US Sector ETFs — Vanguard series (0.09-0.10%)
+    VGT: 9
+    VHT: 10
+    VFH: 10
+    VIS: 10
+    VCR: 10
+    VDC: 10
+    VDE: 10
+    VAW: 10
+    VPU: 10
+    VOX: 10
+    # Geographic ETFs — Franklin FTSE series (0.09-0.19%)
+    FLIN: 19     # Franklin India — 0.19%
+    FLBR: 19     # Franklin Brazil — 0.19%
+    FLJP: 9      # Franklin Japan — 0.09%
+    FLEU: 9      # Franklin Europe — 0.09%
+    FLCH: 19     # Franklin China — 0.19%
+    FLKR: 9      # Franklin S. Korea — 0.09%
+    FLTW: 19     # Franklin Taiwan — 0.19%
+    # Geographic ETFs — iShares/Vanguard legacy
     VGK: 7       # Vanguard Europe — 0.07%
     EWJ: 50      # iShares Japan — 0.50%
     EWY: 57      # iShares S. Korea — 0.57%
@@ -304,12 +351,18 @@ etf_quality:
     KWEB: 69     # KraneShares China Internet — 0.69%
     EEM: 72      # iShares EM (REMOVED — listed for reference) — 0.72%
     FXI: 73      # iShares China LC (REMOVED — listed for reference) — 0.73%
+    INDY: 89     # iShares India 50 — 0.89%
+    FEZ: 29      # SPDR Euro Stoxx 50 — 0.29%
+    DXJ: 48      # WisdomTree Japan Hedged — 0.48%
     # Broad EM alternatives
     IEMG: 9      # iShares Core EM — 0.09% (alternative to VWO)
+    # Cash / Short-duration
+    SGOV: 3      # iShares 0-3 Month Treasury — 0.03%
+    BIL: 14      # SPDR 1-3 Month T-Bill — 0.14%
+    SHV: 15      # iShares Short Treasury — 0.15%
     # Thematic ETFs
     AIQ: 68      # Global X AI — 0.68%
     HACK: 60     # ETFMG Cybersecurity — 0.60%
-    BIL: 14      # SPDR 1-3 Month T-Bill — 0.14%
 
   # Overlap groups: ETFs that substantially overlap in holdings.
   # Within each group, the optimizer will prefer the cheapest member
@@ -339,6 +392,116 @@ etf_quality:
   max_single_region_pct: 15.0     # No single multi-country ETF (VGK, VWO) > 15%
   max_em_total_pct: 20.0          # Total EM exposure cap
   max_intl_total_pct: 35.0        # Total international cap (developed + EM)
+
+  # Per-ticker weight caps (defense-heavy sectors that CVaR over-allocates)
+  per_ticker_cap_pct:
+    XLU: 6.0                      # Utilities: defensive, high-div, cap at 6% for 27yo offense
+
+  # Offense-excluded ETFs: these tickers are zeroed out in offense regime.
+  # XLP (Consumer Staples) is purely defensive, high-dividend, and doesn't
+  # belong in an aggressive 27yo's offense portfolio.
+  offense_exclude:
+    - XLP                         # Consumer Staples — defensive, ~2.6% yield, no growth thesis
+
+# --------------------------------------------------------------------------
+# ETF AUTO-SELECTOR (Monthly best-in-class evaluation)
+# --------------------------------------------------------------------------
+# For each exposure slot, the system evaluates candidate ETFs on expense ratio,
+# AUM (liquidity), and holdings breadth, then selects the optimal fund.
+# Run: python etf_selector.py --force
+# Cache: etf_selections.json (refreshed monthly)
+etf_selector:
+  max_cache_age_days: 31           # Re-evaluate monthly
+
+  exposure_slots:
+    # === US SECTOR ETFs ===
+    # SPDR XL* series (0.09%) vs Fidelity MSCI series (0.084%)
+    # Fidelity tracks MSCI (broader, includes mid-caps) vs S&P 500-only
+    us_technology:
+      asset_class: us_equities
+      candidates: [FTEC, VGT, XLK]
+      typical_holdings: 300
+    us_healthcare:
+      asset_class: healthcare
+      candidates: [FHLC, VHT, XLV]
+      typical_holdings: 400
+    us_financials:
+      asset_class: us_equities
+      candidates: [FNCL, VFH, XLF]
+      typical_holdings: 400
+    us_industrials:
+      asset_class: us_equities
+      candidates: [FIDU, VIS, XLI]
+      typical_holdings: 350
+    us_consumer_disc:
+      asset_class: us_equities
+      candidates: [FDIS, VCR, XLY]
+      typical_holdings: 300
+    us_consumer_staples:
+      asset_class: us_equities
+      candidates: [FSTA, VDC, XLP]
+      typical_holdings: 100
+    us_energy:
+      asset_class: energy_materials
+      candidates: [FENY, VDE, XLE]
+      typical_holdings: 100
+    us_materials:
+      asset_class: energy_materials
+      candidates: [FMAT, VAW, XLB]
+      typical_holdings: 100
+    us_utilities:
+      asset_class: us_equities
+      candidates: [FUTY, VPU, XLU]
+      typical_holdings: 70
+    us_real_estate:
+      asset_class: us_equities
+      candidates: [FREL, VNQ, XLRE]
+      typical_holdings: 150
+    us_communication:
+      asset_class: us_equities
+      candidates: [FCOM, VOX, XLC]
+      typical_holdings: 100
+
+    # === GEOGRAPHIC ETFs ===
+    # Franklin FTSE series (0.09-0.19%) vs iShares EW* series (0.50-0.65%)
+    india:
+      asset_class: em_equities
+      candidates: [FLIN, INDA, INDY]
+      typical_holdings: 200
+    brazil:
+      asset_class: em_equities
+      candidates: [FLBR, EWZ]
+      typical_holdings: 80
+    japan:
+      asset_class: intl_developed
+      candidates: [FLJP, EWJ, DXJ]
+      typical_holdings: 300
+    europe:
+      asset_class: intl_developed
+      candidates: [VGK, FLEU, FEZ]
+      typical_holdings: 500
+    china:
+      asset_class: em_equities
+      candidates: [FLCH, MCHI, FXI]
+      typical_holdings: 200
+    south_korea:
+      asset_class: em_equities
+      candidates: [FLKR, EWY]
+      typical_holdings: 100
+    taiwan:
+      asset_class: em_equities
+      candidates: [FLTW, EWT]
+      typical_holdings: 90
+    broad_em:
+      asset_class: em_equities
+      candidates: [VWO, IEMG, EEM]
+      typical_holdings: 4000
+
+    # === CASH / SHORT-DURATION ===
+    cash_tbill:
+      asset_class: cash_short_duration
+      candidates: [SGOV, BIL, SHV]
+      typical_holdings: 20
 
 # --------------------------------------------------------------------------
 # FRED MACROECONOMIC SERIES
