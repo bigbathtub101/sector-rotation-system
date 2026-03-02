@@ -622,8 +622,8 @@ ASSET_CLASS_MAP = {
     "VGK": "intl_developed", "EWJ": "intl_developed",
     # Emerging Markets
     "EEM": "em_equities", "INDA": "em_equities", "EWZ": "em_equities",
-    "FXI": "em_equities", "EWY": "em_equities", "EWT": "em_equities",
-    "KWEB": "em_equities", "VWO": "em_equities",
+    "FXI": "em_equities", "MCHI": "em_equities", "EWY": "em_equities", "EWT": "em_equities",
+    "KWEB": "em_equities", "VWO": "em_equities", "IEMG": "em_equities",
     # Benchmarks / Cash
     "BIL": "cash_short_duration", "AGG": "cash_short_duration",
     "TLT": "cash_short_duration",
@@ -639,6 +639,185 @@ ASSET_CLASS_MAP = {
 def _get_asset_class(ticker: str) -> str:
     """Map a ticker to its asset class for allocation band purposes."""
     return ASSET_CLASS_MAP.get(ticker, "us_equities")
+
+
+# ===========================================================================
+# ETF STRUCTURAL QUALITY FILTER (Phase 11 Enhancement)
+# ===========================================================================
+
+def apply_etf_quality_filter(
+    weights: Dict[str, float],
+    cfg: dict,
+) -> Dict[str, float]:
+    """
+    Post-optimization pass that enforces ETF structural quality rules:
+
+    1. Expense ratio penalty — reduces weight proportional to fee drag
+    2. Overlap group enforcement — within groups that overlap substantially,
+       concentrates weight into the preferred (cheapest/broadest) member
+    3. Single-country concentration cap
+    4. Total EM / international caps
+
+    All thresholds are in config.yaml under etf_quality.
+    """
+    eq = cfg.get("etf_quality", {})
+    if not eq:
+        return weights
+
+    expense_ratios = eq.get("expense_ratios_bps", {})
+    penalty_factor = eq.get("expense_penalty_factor", 2.0)
+    max_expense_bps = eq.get("max_expense_ratio_bps", 50)
+    overlap_groups = eq.get("overlap_groups", {})
+    max_country_pct = eq.get("max_single_country_pct", 8.0) / 100.0
+    max_em_pct = eq.get("max_em_total_pct", 20.0) / 100.0
+    max_intl_pct = eq.get("max_intl_total_pct", 35.0) / 100.0
+
+    adjusted = dict(weights)
+
+    # --- 1. Expense ratio penalty ---
+    for ticker, w in list(adjusted.items()):
+        if w <= 0:
+            continue
+        er_bps = expense_ratios.get(ticker, 0)
+        if er_bps > max_expense_bps:
+            er_decimal = er_bps / 10000.0
+            penalty = max(0.5, 1.0 - penalty_factor * er_decimal)
+            old_w = adjusted[ticker]
+            adjusted[ticker] = w * penalty
+            logger.info("ETF quality: %s expense ratio %d bps > %d cap "
+                        "→ weight %.4f → %.4f (penalty %.1f%%)",
+                        ticker, er_bps, max_expense_bps,
+                        old_w, adjusted[ticker], (1 - penalty) * 100)
+
+    # --- 2. Overlap group enforcement ---
+    for group_name, group_cfg in overlap_groups.items():
+        members = group_cfg.get("members", [])
+        preferred = group_cfg.get("preferred", "")
+        overlap_pct = group_cfg.get("overlap_pct", 0)
+        max_combined = group_cfg.get("max_combined_weight_pct")
+
+        if overlap_pct < 30:
+            # Low overlap — don't consolidate, but apply combined cap if set
+            if max_combined is not None:
+                cap = max_combined / 100.0
+                member_weights = {t: adjusted.get(t, 0) for t in members if adjusted.get(t, 0) > 0}
+                total_group = sum(member_weights.values())
+                if total_group > cap:
+                    scale = cap / total_group
+                    for t in member_weights:
+                        adjusted[t] = adjusted[t] * scale
+                    logger.info("ETF quality: overlap group '%s' capped at %.1f%% "
+                                "(was %.1f%%)", group_name, cap * 100, total_group * 100)
+            continue
+
+        # High overlap (>=30%) — consolidate into preferred member
+        member_weights = {t: adjusted.get(t, 0) for t in members if adjusted.get(t, 0) > 0}
+        if len(member_weights) <= 1:
+            continue
+
+        non_preferred = {t: w for t, w in member_weights.items() if t != preferred}
+        if not non_preferred:
+            continue
+
+        # Move weight from non-preferred to preferred
+        total_moved = 0
+        for t, w in non_preferred.items():
+            move_pct = overlap_pct / 100.0  # Move proportional to overlap
+            move_amount = w * move_pct
+            adjusted[t] = w - move_amount
+            total_moved += move_amount
+            logger.info("ETF quality: overlap '%s' — moving %.4f from %s to %s "
+                        "(%d%% overlap)", group_name, move_amount, t, preferred, overlap_pct)
+
+        adjusted[preferred] = adjusted.get(preferred, 0) + total_moved
+
+    # --- 3. Single-country concentration cap ---
+    country_etfs = ["EWJ", "EWY", "EWT", "EWZ", "MCHI", "FXI", "INDA", "KWEB"]
+    country_etfs_set = set(country_etfs)
+    for t in country_etfs:
+        if adjusted.get(t, 0) > max_country_pct:
+            excess = adjusted[t] - max_country_pct
+            adjusted[t] = max_country_pct
+            # Redistribute excess to VWO (broad EM) or VGK (intl developed)
+            if _get_asset_class(t) == "em_equities":
+                adjusted["VWO"] = adjusted.get("VWO", 0) + excess
+            else:
+                adjusted["VGK"] = adjusted.get("VGK", 0) + excess
+            logger.info("ETF quality: %s capped at %.1f%% (single-country cap), "
+                        "excess %.4f redistributed", t, max_country_pct * 100, excess)
+
+    # --- 3b. Single-region ETF cap (e.g. VGK, VWO) ---
+    max_region_pct = eq.get("max_single_region_pct", 15.0) / 100.0
+    region_etfs = ["VGK", "VWO", "IEMG", "EEM"]
+    for t in region_etfs:
+        if adjusted.get(t, 0) > max_region_pct:
+            excess = adjusted[t] - max_region_pct
+            adjusted[t] = max_region_pct
+            # Redistribute excess to BIL (cash) — don't inflate other regions
+            adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+            logger.info("ETF quality: %s capped at %.1f%% (single-region cap), "
+                        "excess %.4f to BIL", t, max_region_pct * 100, excess)
+
+    # --- 4. Total EM and international caps ---
+    em_tickers = [t for t, w in adjusted.items()
+                  if w > 0 and _get_asset_class(t) == "em_equities"]
+    em_total = sum(adjusted[t] for t in em_tickers)
+    if em_total > max_em_pct:
+        scale = max_em_pct / em_total
+        excess = em_total - max_em_pct
+        for t in em_tickers:
+            adjusted[t] *= scale
+        # Put excess into cash (BIL)
+        adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+        logger.info("ETF quality: total EM %.1f%% > %.1f%% cap — scaled down, "
+                    "excess to BIL", em_total * 100, max_em_pct * 100)
+
+    intl_classes = {"intl_developed", "em_equities"}
+    intl_tickers = [t for t, w in adjusted.items()
+                    if w > 0 and _get_asset_class(t) in intl_classes]
+    intl_total = sum(adjusted[t] for t in intl_tickers)
+    if intl_total > max_intl_pct:
+        scale = max_intl_pct / intl_total
+        excess = intl_total - max_intl_pct
+        for t in intl_tickers:
+            adjusted[t] *= scale
+        adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+        logger.info("ETF quality: total intl %.1f%% > %.1f%% cap — scaled down",
+                    intl_total * 100, max_intl_pct * 100)
+
+    # --- Normalize back to 1.0 ---
+    total = sum(adjusted.values())
+    if total > 0:
+        adjusted = {t: w / total for t, w in adjusted.items()}
+
+    # --- Second-pass cap enforcement (normalization can re-inflate capped ETFs) ---
+    any_clipped = True
+    for _ in range(5):  # max 5 iterations to converge
+        any_clipped = False
+        for t in region_etfs:
+            if adjusted.get(t, 0) > max_region_pct + 1e-6:
+                excess = adjusted[t] - max_region_pct
+                adjusted[t] = max_region_pct
+                adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+                any_clipped = True
+        # Re-check country caps
+        country_etfs_final = [t for t in adjusted if t in country_etfs_set and adjusted[t] > max_country_pct + 1e-6]
+        for t in country_etfs_final:
+            excess = adjusted[t] - max_country_pct
+            adjusted[t] = max_country_pct
+            adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+            any_clipped = True
+        if any_clipped:
+            total = sum(adjusted.values())
+            if total > 0:
+                adjusted = {t: w / total for t, w in adjusted.items()}
+        else:
+            break
+
+    # Remove zero/near-zero weights
+    adjusted = {t: w for t, w in adjusted.items() if w > 0.001}
+
+    return adjusted
 
 
 def _compute_allocation_bounds(
@@ -1419,6 +1598,11 @@ def run_portfolio_optimization(
     # --- Step 5.6: Concentrate portfolio (FIX 5) ---
     max_positions = cfg.get("optimizer", {}).get("max_positions", 15)
     weights = _concentrate_portfolio(weights, max_positions, factor_scores)
+
+    # --- Step 5.7: ETF structural quality filter (Phase 11 Enhancement) ---
+    logger.info("Applying ETF quality filter (expense ratios, overlap, caps)...")
+    weights = apply_etf_quality_filter(weights, cfg)
+    logger.info("Post-quality weights: %d positions", sum(1 for w in weights.values() if w > 0.001))
 
     # --- Step 6: Dollar allocation ---
     logger.info("Computing dollar allocation...")

@@ -337,9 +337,10 @@ def run_regime_detection(conn: sqlite3.Connection, cfg: dict,
 
 def run_optimizer(conn: sqlite3.Connection, cfg: dict,
                   regime: str,
-                  mock: bool = False) -> Dict[str, Any]:
+                  mock: bool = False,
+                  force: bool = False) -> Dict[str, Any]:
     """
-    Step 4: If regime changed, rerun CVaR optimizer with new bands.
+    Step 4: If regime changed (or force=True), rerun CVaR optimizer with new bands.
     """
     result = {"step": "optimizer", "status": "ok", "allocation": {}}
 
@@ -349,7 +350,9 @@ def run_optimizer(conn: sqlite3.Connection, cfg: dict,
 
     result["regime_changed"] = regime_changed
 
-    if mock or not regime_changed:
+    if force:
+        logger.info("Optimizer: --force-reoptimize flag set — running optimizer.")
+    elif mock or not regime_changed:
         if prev_alloc:
             result["allocation"] = prev_alloc
         else:
@@ -1094,6 +1097,8 @@ def main():
                         help="Path to config.yaml")
     parser.add_argument("--no-deliver", action="store_true",
                         help="Skip Telegram/email/Sheets delivery")
+    parser.add_argument("--force-reoptimize", action="store_true",
+                        help="Force optimizer re-run even if regime unchanged")
     args = parser.parse_args()
 
     # --run-daily is the inverse of --mock + --no-deliver:
@@ -1156,7 +1161,8 @@ def main():
 
         # Step 4: Optimizer (if regime changed)
         logger.info("Step 4: Optimizer check...")
-        optimizer_result = run_optimizer(conn, cfg, regime, mock=args.mock)
+        force_reopt = getattr(args, 'force_reoptimize', False)
+        optimizer_result = run_optimizer(conn, cfg, regime, mock=args.mock, force=force_reopt)
         allocation = optimizer_result.get("allocation", {})
         regime_changed = optimizer_result.get("regime_changed", False)
         logger.info("  Optimizer: %s (regime_changed: %s)",
