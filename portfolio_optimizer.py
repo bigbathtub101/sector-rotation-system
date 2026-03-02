@@ -32,6 +32,16 @@ import pandas as pd
 import yaml
 from scipy import stats as sp_stats
 
+# ETF Auto-Selector: dynamically chooses best-in-class ETFs per exposure slot
+try:
+    from etf_selector import (
+        get_selected_tickers as _get_etf_selections,
+        get_ticker_asset_class_map as _get_selector_asset_class_map,
+    )
+    _ETF_SELECTOR_AVAILABLE = True
+except ImportError:
+    _ETF_SELECTOR_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # LOGGING & CONFIG
 # ---------------------------------------------------------------------------
@@ -598,19 +608,31 @@ def _smart_fallback(
 # ===========================================================================
 
 # Asset class mapping: ticker -> asset_class key in config
+# This base map covers all legacy tickers + Fidelity/Vanguard/Franklin alternatives.
+# At runtime, it's augmented by etf_selector cache (see _get_asset_class).
 ASSET_CLASS_MAP = {
-    # US Equities (11 GICS sector ETFs)
+    # US Equities — SPDR XL* series (11 GICS sectors)
     "XLK": "us_equities", "XLV": "healthcare", "XLE": "energy_materials",
     "XLF": "us_equities", "XLI": "us_equities", "XLB": "energy_materials",
     "XLU": "us_equities", "XLP": "us_equities", "XLRE": "us_equities",
     "XLC": "us_equities", "XLY": "us_equities",
+    # US Equities — Fidelity MSCI series (auto-selector candidates)
+    "FTEC": "us_equities", "FHLC": "healthcare", "FENY": "energy_materials",
+    "FNCL": "us_equities", "FIDU": "us_equities", "FMAT": "energy_materials",
+    "FUTY": "us_equities", "FSTA": "us_equities", "FREL": "us_equities",
+    "FCOM": "us_equities", "FDIS": "us_equities",
+    # US Equities — Vanguard series (auto-selector candidates)
+    "VGT": "us_equities", "VHT": "healthcare", "VDE": "energy_materials",
+    "VFH": "us_equities", "VIS": "us_equities", "VAW": "energy_materials",
+    "VPU": "us_equities", "VDC": "us_equities", "VNQ": "us_equities",
+    "VOX": "us_equities", "VCR": "us_equities",
     # Industry / Sub-sector ETFs
     "SOXX": "industry_sub", "IGV": "industry_sub", "HACK": "industry_sub",
     "SKYY": "industry_sub", "XBI": "industry_sub", "IHI": "industry_sub",
     "XPH": "industry_sub", "KBE": "industry_sub", "KRE": "industry_sub",
     "IAI": "industry_sub", "XHB": "industry_sub", "XRT": "industry_sub",
     "IBUY": "industry_sub", "ITA": "industry_sub", "IYT": "industry_sub",
-    "XOP": "industry_sub", "OIH": "industry_sub", "VNQ": "industry_sub",
+    "XOP": "industry_sub", "OIH": "industry_sub",
     # Thematic ETFs
     "BOTZ": "thematic", "LIT": "thematic", "ICLN": "thematic",
     "TAN": "thematic", "QCLN": "thematic", "ARKK": "thematic",
@@ -618,14 +640,19 @@ ASSET_CLASS_MAP = {
     "KOMP": "thematic", "UFO": "thematic", "DRIV": "thematic",
     "URNM": "thematic", "URA": "thematic", "REMX": "thematic",
     "COPX": "thematic", "AIQ": "thematic",
-    # International Developed
+    # International Developed — legacy + Franklin FTSE
     "VGK": "intl_developed", "EWJ": "intl_developed",
-    # Emerging Markets
+    "FLJP": "intl_developed", "FLEU": "intl_developed",
+    "FEZ": "intl_developed", "DXJ": "intl_developed",
+    # Emerging Markets — legacy + Franklin FTSE
     "EEM": "em_equities", "INDA": "em_equities", "EWZ": "em_equities",
     "FXI": "em_equities", "MCHI": "em_equities", "EWY": "em_equities", "EWT": "em_equities",
     "KWEB": "em_equities", "VWO": "em_equities", "IEMG": "em_equities",
+    "FLIN": "em_equities", "FLBR": "em_equities", "FLCH": "em_equities",
+    "FLKR": "em_equities", "FLTW": "em_equities", "INDY": "em_equities",
     # Benchmarks / Cash
-    "BIL": "cash_short_duration", "AGG": "cash_short_duration",
+    "BIL": "cash_short_duration", "SGOV": "cash_short_duration",
+    "SHV": "cash_short_duration", "AGG": "cash_short_duration",
     "TLT": "cash_short_duration",
     "GLD": "energy_materials",  # commodity bucket
     "SPY": "us_equities", "QQQ": "us_equities", "IWM": "us_equities",
@@ -634,6 +661,9 @@ ASSET_CLASS_MAP = {
     "QUAL": "us_equities", "SIZE": "us_equities", "COWZ": "us_equities",
     "QQQM": "us_equities",
 }
+
+# Set of all known ETF tickers (for distinguishing ETFs from individual stocks)
+_KNOWN_ETF_TICKERS = set(ASSET_CLASS_MAP.keys())
 
 
 def _get_asset_class(ticker: str) -> str:
@@ -645,6 +675,10 @@ def _get_asset_class(ticker: str) -> str:
 # ETF STRUCTURAL QUALITY FILTER (Phase 11 Enhancement)
 # ===========================================================================
 
+# Cash ticker identifiers — any ticker in this set is treated as cash
+_CASH_TICKERS = {"BIL", "SGOV", "SHV"}
+
+
 def _redistribute_excess(
     adjusted: Dict[str, float],
     excess: float,
@@ -652,18 +686,20 @@ def _redistribute_excess(
 ) -> None:
     """
     Redistribute excess weight pro-rata across all equity positions,
-    excluding BIL (cash) and any tickers in the exclude set.
+    excluding cash tickers (SGOV/BIL/SHV) and any tickers in the exclude set.
     Modifies `adjusted` in place.
     """
     eligible = {t: w for t, w in adjusted.items()
-                if w > 0 and t != "BIL" and t not in exclude}
+                if w > 0 and t not in _CASH_TICKERS and t not in exclude}
     total_eligible = sum(eligible.values())
     if total_eligible > 0:
         for t, w in eligible.items():
             adjusted[t] = w + excess * (w / total_eligible)
     else:
-        # Fallback: no eligible equity positions — park in BIL
-        adjusted["BIL"] = adjusted.get("BIL", 0) + excess
+        # Fallback: no eligible equity positions — park in cash
+        # Use SGOV (auto-selected) if present, else BIL
+        cash_t = "SGOV" if "SGOV" in adjusted else "BIL"
+        adjusted[cash_t] = adjusted.get(cash_t, 0) + excess
 
 
 def apply_etf_quality_filter(
@@ -712,6 +748,44 @@ def apply_etf_quality_filter(
                         "→ weight %.4f → %.4f (penalty %.1f%%)",
                         ticker, er_bps, max_expense_bps,
                         old_w, adjusted[ticker], (1 - penalty) * 100)
+
+    # --- 1b. Offense-excluded tickers (e.g. XLP in offense regime) ---
+    offense_exclude_list = list(eq.get("offense_exclude", []))
+    # Auto-expand: if XLP is excluded, also exclude Fidelity/Vanguard equivalents
+    _OFFENSE_EXCLUDE_EQUIV = {
+        "XLP": ["FSTA", "VDC"],
+    }
+    expanded_exclude = set(offense_exclude_list)
+    for base, equivs in _OFFENSE_EXCLUDE_EQUIV.items():
+        if base in expanded_exclude:
+            expanded_exclude.update(equivs)
+    for ticker in expanded_exclude:
+        if adjusted.get(ticker, 0) > 0:
+            excess = adjusted[ticker]
+            adjusted[ticker] = 0.0
+            _redistribute_excess(adjusted, excess, exclude={ticker})
+            logger.info("ETF quality: %s offense-excluded — %.4f weight "
+                        "redistributed to equities", ticker, excess)
+
+    # --- 1c. Per-ticker weight caps (e.g. XLU at 6%) ---
+    per_ticker_caps = dict(eq.get("per_ticker_cap_pct", {}))
+    # Auto-expand: if XLU is capped, also cap Fidelity/Vanguard equivalents
+    _PER_TICKER_CAP_EQUIV = {
+        "XLU": ["FUTY", "VPU"],
+    }
+    for base, equivs in _PER_TICKER_CAP_EQUIV.items():
+        if base in per_ticker_caps:
+            for eq_t in equivs:
+                if eq_t not in per_ticker_caps:
+                    per_ticker_caps[eq_t] = per_ticker_caps[base]
+    for ticker, cap_pct in per_ticker_caps.items():
+        cap_frac = cap_pct / 100.0
+        if adjusted.get(ticker, 0) > cap_frac:
+            excess = adjusted[ticker] - cap_frac
+            adjusted[ticker] = cap_frac
+            _redistribute_excess(adjusted, excess, exclude={ticker})
+            logger.info("ETF quality: %s capped at %.1f%% (per-ticker cap), "
+                        "excess %.4f redistributed", ticker, cap_pct, excess)
 
     # --- 2. Overlap group enforcement ---
     for group_name, group_cfg in overlap_groups.items():
@@ -1019,7 +1093,7 @@ def apply_us_subsector_allocation(
     val_cfg = cfg["factor_model"]["valuation"]
     mom_cap = val_cfg["momentum_cap_fraction"]  # 0.50
 
-    energy_materials = ["XLE", "XLB"]
+    energy_materials = [t for t in sector_etfs if _get_asset_class(t) == "energy_materials"]
 
     # --- Pass 1: collect composite scores and labels ---
     raw_scores: Dict[str, float] = {}
@@ -1240,11 +1314,7 @@ def _concentrate_portfolio(
             continue
         ac = _get_asset_class(ticker)
         # Check if this is an individual stock (not an ETF in our universe)
-        if ac == "us_equities" and ticker not in {
-            "XLK", "XLV", "XLE", "XLF", "XLI", "XLB", "XLU", "XLP",
-            "XLRE", "XLC", "XLY", "SPY", "QQQ", "IWM",
-            "MTUM", "VLUE", "USMV", "QUAL", "SIZE", "COWZ", "QQQM",
-        }:
+        if ac == "us_equities" and ticker not in _KNOWN_ETF_TICKERS:
             # Could be a screener pick — mark as individual
             ac = INDIVIDUAL_SENTINEL
 
@@ -1350,16 +1420,61 @@ def allocate_dollars(
         roth_tickers.add(t)
 
     # Geographic ETFs → Taxable (foreign tax credit)
+    # Includes legacy tickers from config + all Franklin FTSE alternatives
     for t in cfg["tickers"].get("geographic_etfs", []):
         taxable_tickers.add(t)
+    # Add auto-selector geographic candidates (Franklin FTSE series)
+    _GEOGRAPHIC_TICKERS = {"FLIN", "FLBR", "FLJP", "FLEU", "FLCH", "FLKR", "FLTW",
+                           "INDA", "EWZ", "EWJ", "EWY", "EWT", "VGK", "MCHI",
+                           "VWO", "IEMG", "EEM", "FXI", "KWEB", "INDY", "FEZ", "DXJ"}
+    for t in _GEOGRAPHIC_TICKERS:
+        taxable_tickers.add(t)
 
-    # Cash/bonds → Taxable
-    for t in ["BIL", "AGG", "TLT"]:
+    # Cash/bonds → Taxable (includes auto-selected cash ticker like SGOV)
+    for t in _CASH_TICKERS | {"AGG", "TLT"}:
         taxable_tickers.add(t)
 
     # Energy/Materials ETFs → Taxable (structural diversifier, low turnover)
-    for t in ["XLE", "XLB", "GLD"]:
+    # Includes auto-selected variants (FENY, FMAT, VDE, VAW)
+    energy_mat_tickers = {t for t, ac in ASSET_CLASS_MAP.items() if ac == "energy_materials"}
+    energy_mat_tickers.add("GLD")  # commodity bucket
+    for t in energy_mat_tickers:
         taxable_tickers.add(t)
+
+    # === Dividend-yield-aware tax location (Taxable Yield Trap fix) ===
+    # High-dividend US sectors → Roth (dividends taxed as ordinary income in taxable)
+    high_div_sectors = set(cfg.get("tax_location", {}).get("high_dividend_sectors", []))
+    # Map auto-selected equivalents: Fidelity/Vanguard sector ETFs inherit the
+    # same dividend routing as their SPDR counterparts (same underlying sectors)
+    _SECTOR_DIVIDEND_EQUIV = {
+        # High-dividend equivalents
+        "XLU": ["FUTY", "VPU"],   # Utilities ~2.8% yield
+        "XLP": ["FSTA", "VDC"],   # Consumer Staples ~2.6% yield
+        "XLRE": ["FREL", "VNQ"],  # Real Estate ~3.2% yield
+        # Growth/low-dividend equivalents
+        "XLI": ["FIDU", "VIS"],   # Industrials ~1.4% yield
+        "XLK": ["FTEC", "VGT"],   # Technology ~0.6% yield
+        "XLC": ["FCOM", "VOX"],   # Communication ~0.8% yield
+        "XLY": ["FDIS", "VCR"],   # Consumer Disc ~0.9% yield
+        "XLF": ["FNCL", "VFH"],   # Financials ~1.3% yield
+    }
+    for spdr, equivs in _SECTOR_DIVIDEND_EQUIV.items():
+        if spdr in high_div_sectors:
+            for eq in equivs:
+                high_div_sectors.add(eq)
+    for t in high_div_sectors:
+        roth_tickers.add(t)
+        taxable_tickers.discard(t)  # ensure no conflict
+
+    # Growth/appreciation US sectors → Taxable (long-term cap gains taxed favorably)
+    growth_sectors = set(cfg.get("tax_location", {}).get("growth_sectors", []))
+    for spdr, equivs in _SECTOR_DIVIDEND_EQUIV.items():
+        if spdr in growth_sectors:
+            for eq in equivs:
+                growth_sectors.add(eq)
+    for t in growth_sectors:
+        taxable_tickers.add(t)
+        roth_tickers.discard(t)  # ensure no conflict
 
     result = {}
     roth_used = 0.0
@@ -1385,11 +1500,17 @@ def allocate_dollars(
         # Determine account placement
         if ticker in roth_tickers or is_momentum_only:
             # Roth first
+            if ticker in high_div_sectors:
+                base_reason = "Roth: high-dividend sector (avoid taxable dividend drag)"
+            elif is_momentum_only:
+                base_reason = "Roth: momentum-only position (high turnover)"
+            else:
+                base_reason = "Roth: thematic/high-turnover position"
             if roth_used + dollars <= roth_cap:
                 account = "roth_ira"
                 roth_dollars = dollars
                 taxable_dollars = 0.0
-                reason = "Roth: thematic/high-turnover/momentum position"
+                reason = base_reason
                 roth_used += dollars
             elif dollars > split_thresh and roth_used < roth_cap and taxable_used < taxable_cap:
                 roth_avail = round(roth_cap - roth_used, 2)
@@ -1428,11 +1549,15 @@ def allocate_dollars(
                 taxable_used += taxable_dollars
 
         elif ticker in taxable_tickers:
+            if ticker in growth_sectors:
+                base_tax_reason = "Taxable: growth sector (capital appreciation, low dividend)"
+            else:
+                base_tax_reason = "Taxable: geographic/cash/energy (foreign tax credit / low turnover)"
             if taxable_used + dollars <= taxable_cap:
                 account = "taxable"
                 taxable_dollars = dollars
                 roth_dollars = 0.0
-                reason = "Taxable: geographic/cash/energy (foreign tax credit / low turnover)"
+                reason = base_tax_reason
                 taxable_used += dollars
             elif roth_used + dollars <= roth_cap:
                 account = "roth_ira"
@@ -1555,11 +1680,21 @@ def run_portfolio_optimization(
     logger.info("Top factor scores:\n%s", factor_scores.head(5).to_string())
 
     # --- Step 3: Load price returns for optimization ---
+    # Use auto-selected tickers when available
     sector_tickers = cfg["tickers"]["sector_etfs"]
     geo_tickers = cfg["tickers"]["geographic_etfs"]
     industry_tickers = cfg["tickers"].get("industry_etfs", [])
     thematic_tickers = cfg["tickers"].get("thematic_etfs", [])
-    cash_tickers = ["BIL"]
+
+    # Resolve best-in-class cash ticker from ETF selector (default SGOV)
+    if _ETF_SELECTOR_AVAILABLE:
+        etf_selections = _get_etf_selections(cfg)
+        cash_ticker = etf_selections.get("cash_tbill", "SGOV")
+        logger.info("ETF selector: cash ticker = %s", cash_ticker)
+    else:
+        cash_ticker = "SGOV"  # default to SGOV (cheapest)
+
+    cash_tickers = [cash_ticker]
     all_opt_tickers = sector_tickers + geo_tickers + industry_tickers + thematic_tickers + cash_tickers
     # Deduplicate while preserving order
     seen = set()
@@ -1637,7 +1772,7 @@ def run_portfolio_optimization(
         dropped = []
         for _ in range(10):  # iterate until no sub-minimum positions remain
             sub_min = {t: w for t, w in weights.items()
-                       if 0 < w < min_pct and t != "BIL"}
+                       if 0 < w < min_pct and t not in _CASH_TICKERS}
             if not sub_min:
                 break
             total_excess = sum(sub_min.values())
@@ -1660,6 +1795,38 @@ def run_portfolio_optimization(
 
         # Re-apply quality caps since redistribution may have inflated capped ETFs
         weights = apply_etf_quality_filter(weights, cfg)
+
+    # --- Step 5.9: ETF ticker substitution (auto-selector) ---
+    # Replace SPDR/legacy tickers with auto-selected best-in-class ETFs.
+    # Optimization runs on SPDR tickers (which have price history in DB),
+    # but final allocation uses the cheapest equivalent (e.g., XLK → FTEC).
+    if _ETF_SELECTOR_AVAILABLE:
+        _SLOT_TO_LEGACY = {
+            "us_technology": "XLK", "us_healthcare": "XLV", "us_financials": "XLF",
+            "us_industrials": "XLI", "us_consumer_disc": "XLY",
+            "us_consumer_staples": "XLP", "us_energy": "XLE", "us_materials": "XLB",
+            "us_utilities": "XLU", "us_real_estate": "XLRE",
+            "us_communication": "XLC",
+            "india": "INDA", "brazil": "EWZ", "japan": "EWJ",
+            "europe": "VGK", "china": "MCHI", "south_korea": "EWY",
+            "taiwan": "EWT", "broad_em": "VWO",
+            "cash_tbill": "BIL",
+        }
+        # Build reverse: legacy_ticker → selected_ticker
+        etf_subs = {}
+        for slot, legacy in _SLOT_TO_LEGACY.items():
+            selected = etf_selections.get(slot)
+            if selected and selected != legacy:
+                etf_subs[legacy] = selected
+
+        if etf_subs:
+            new_weights = {}
+            for t, w in weights.items():
+                new_t = etf_subs.get(t, t)
+                new_weights[new_t] = new_weights.get(new_t, 0) + w
+            weights = new_weights
+            logger.info("ETF substitution: %s",
+                        ", ".join(f"{old}→{new}" for old, new in sorted(etf_subs.items())))
 
     # --- Step 6: Dollar allocation ---
     logger.info("Computing dollar allocation...")
@@ -1753,7 +1920,7 @@ if __name__ == "__main__":
             np.random.seed(42)
             mock_rows = []
             all_mock_tickers = (cfg["tickers"]["sector_etfs"] +
-                                cfg["tickers"]["geographic_etfs"] + ["BIL", "SPY"])
+                                cfg["tickers"]["geographic_etfs"] + ["SGOV", "BIL", "SPY"])
             for ticker in all_mock_tickers:
                 base = np.random.uniform(30, 200)
                 prices = base * np.exp(np.cumsum(np.random.normal(0.0003, 0.015, len(dates))))
