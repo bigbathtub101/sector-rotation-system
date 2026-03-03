@@ -764,162 +764,85 @@ def apply_etf_quality_filter(
             excess = adjusted[ticker]
             adjusted[ticker] = 0.0
             _redistribute_excess(adjusted, excess, exclude={ticker})
-            logger.info("ETF quality: %s offense-excluded -- %.4f weight "
-                        "redistributed to equities", ticker, excess)
-
-    # --- 1c. Per-ticker weight caps (e.g. XLU at 6%) ---
-    per_ticker_caps = dict(eq.get("per_ticker_cap_pct", {}))
-    # Auto-expand: if XLU is capped, also cap Fidelity/Vanguard equivalents
-    _PER_TICKER_CAP_EQUIV = {
-        "XLU": ["FUTY", "VPU"],
-    }
-    for base, equivs in _PER_TICKER_CAP_EQUIV.items():
-        if base in per_ticker_caps:
-            for eq_t in equivs:
-                if eq_t not in per_ticker_caps:
-                    per_ticker_caps[eq_t] = per_ticker_caps[base]
-    for ticker, cap_pct in per_ticker_caps.items():
-        cap_frac = cap_pct / 100.0
-        if adjusted.get(ticker, 0) > cap_frac:
-            excess = adjusted[ticker] - cap_frac
-            adjusted[ticker] = cap_frac
-            _redistribute_excess(adjusted, excess, exclude={ticker})
-            logger.info("ETF quality: %s capped at %.1f%% (per-ticker cap), "
-                        "excess %.4f redistributed", ticker, cap_pct, excess)
+            logger.info("ETF quality: %s offense-excluded -- %.4f redistributed",
+                        ticker, excess)
 
     # --- 2. Overlap group enforcement ---
-    for group_name, group_cfg in overlap_groups.items():
-        members = group_cfg.get("members", [])
-        preferred = group_cfg.get("preferred", "")
-        overlap_pct = group_cfg.get("overlap_pct", 0)
-        max_combined = group_cfg.get("max_combined_weight_pct")
-
-        if overlap_pct < 30:
-            # Low overlap -- don't consolidate, but apply combined cap if set
-            if max_combined is not None:
-                cap = max_combined / 100.0
-                member_weights = {t: adjusted.get(t, 0) for t in members if adjusted.get(t, 0) > 0}
-                total_group = sum(member_weights.values())
-                if total_group > cap:
-                    scale = cap / total_group
-                    for t in member_weights:
-                        adjusted[t] = adjusted[t] * scale
-                    logger.info("ETF quality: overlap group '%s' capped at %.1f%% "
-                                "(was %.1f%%)", group_name, cap * 100, total_group * 100)
+    for group_name, group_tickers in overlap_groups.items():
+        present = {t: adjusted.get(t, 0.0) for t in group_tickers if adjusted.get(t, 0.0) > 0}
+        if len(present) <= 1:
             continue
-
-        # High overlap (>=30%) -- consolidate into preferred member
-        member_weights = {t: adjusted.get(t, 0) for t in members if adjusted.get(t, 0) > 0}
-        if len(member_weights) <= 1:
-            continue
-
-        non_preferred = {t: w for t, w in member_weights.items() if t != preferred}
-        if not non_preferred:
-            continue
-
-        # Move weight from non-preferred to preferred
-        total_moved = 0
-        for t, w in non_preferred.items():
-            move_pct = overlap_pct / 100.0  # Move proportional to overlap
-            move_amount = w * move_pct
-            adjusted[t] = w - move_amount
-            total_moved += move_amount
-            logger.info("ETF quality: overlap '%s' -- moving %.4f from %s to %s "
-                        "(%d%% overlap)", group_name, move_amount, t, preferred, overlap_pct)
-
-        adjusted[preferred] = adjusted.get(preferred, 0) + total_moved
+        # Keep the ticker with the highest weight (preferred = broadest/cheapest)
+        # Consolidate all weight into it
+        best = max(present, key=lambda t: present[t])
+        total_group = sum(present.values())
+        for t, w in present.items():
+            if t != best:
+                adjusted[t] = 0.0
+        adjusted[best] = total_group
+        logger.info("ETF quality: overlap group '%s' -> consolidated %s tickers into %s (%.4f)",
+                    group_name, len(present), best, total_group)
 
     # --- 3. Single-country concentration cap ---
-    country_etfs = ["EWJ", "EWY", "EWT", "EWZ", "MCHI", "FXI", "INDA", "KWEB"]
-    country_etfs_set = set(country_etfs)
-    for t in country_etfs:
-        if adjusted.get(t, 0) > max_country_pct:
-            excess = adjusted[t] - max_country_pct
-            adjusted[t] = max_country_pct
-            # Redistribute excess to VWO (broad EM) or VGK (intl developed)
-            if _get_asset_class(t) == "em_equities":
-                adjusted["VWO"] = adjusted.get("VWO", 0) + excess
-            else:
-                adjusted["VGK"] = adjusted.get("VGK", 0) + excess
-            logger.info("ETF quality: %s capped at %.1f%% (single-country cap), "
-                        "excess %.4f redistributed", t, max_country_pct * 100, excess)
+    # Single-country EM tickers by country
+    country_groups = {
+        "india": ["INDA", "INDY", "FLIN"],
+        "china": ["FXI", "MCHI", "KWEB", "FLCH"],
+        "brazil": ["EWZ", "FLBR"],
+        "korea": ["EWY", "FLKR"],
+        "taiwan": ["EWT", "FLTW"],
+        "japan": ["EWJ", "FLJP", "DXJ"],
+        "europe": ["VGK", "FLEU", "FEZ"],
+    }
+    for country, ctickers in country_groups.items():
+        country_weight = sum(adjusted.get(t, 0) for t in ctickers)
+        if country_weight > max_country_pct:
+            excess_country = country_weight - max_country_pct
+            scale = max_country_pct / country_weight
+            for t in ctickers:
+                if adjusted.get(t, 0) > 0:
+                    adjusted[t] *= scale
+            _redistribute_excess(adjusted, excess_country, exclude=set(ctickers))
+            logger.info("ETF quality: %s country cap: %.1f%% -> %.1f%% (excess %.4f redistributed)",
+                        country, country_weight * 100, max_country_pct * 100, excess_country)
 
-    # --- 3b. Single-region ETF cap (e.g. VGK, VWO) ---
-    max_region_pct = eq.get("max_single_region_pct", 15.0) / 100.0
-    region_etfs = ["VGK", "VWO", "IEMG", "EEM"]
-    for t in region_etfs:
-        if adjusted.get(t, 0) > max_region_pct:
-            excess = adjusted[t] - max_region_pct
-            adjusted[t] = max_region_pct
-            # Redistribute excess pro-rata across all other equities
-            _redistribute_excess(adjusted, excess, exclude={t})
-            logger.info("ETF quality: %s capped at %.1f%% (single-region cap), "
-                        "excess %.4f redistributed to equities",
-                        t, max_region_pct * 100, excess)
+    # --- 4. Total EM cap ---
+    em_tickers_list = [t for t, ac in ASSET_CLASS_MAP.items() if ac == "em_equities"]
+    total_em = sum(adjusted.get(t, 0) for t in em_tickers_list)
+    if total_em > max_em_pct:
+        excess_em = total_em - max_em_pct
+        scale = max_em_pct / total_em
+        for t in em_tickers_list:
+            if adjusted.get(t, 0) > 0:
+                adjusted[t] *= scale
+        _redistribute_excess(adjusted, excess_em, exclude=set(em_tickers_list))
+        logger.info("ETF quality: EM total cap: %.1f%% -> %.1f%% (excess %.4f redistributed)",
+                    total_em * 100, max_em_pct * 100, excess_em)
 
-    # --- 4. Total EM and international caps ---
-    em_tickers = [t for t, w in adjusted.items()
-                  if w > 0 and _get_asset_class(t) == "em_equities"]
-    em_total = sum(adjusted[t] for t in em_tickers)
-    if em_total > max_em_pct:
-        scale = max_em_pct / em_total
-        excess = em_total - max_em_pct
-        for t in em_tickers:
-            adjusted[t] *= scale
-        # Redistribute excess pro-rata across non-EM equities
-        _redistribute_excess(adjusted, excess, exclude=set(em_tickers))
-        logger.info("ETF quality: total EM %.1f%% > %.1f%% cap -- scaled down, "
-                    "excess redistributed to equities", em_total * 100, max_em_pct * 100)
+    # --- 4b. Total international cap (EM + Intl Developed) ---
+    intl_tickers_list = [t for t, ac in ASSET_CLASS_MAP.items() if ac in ("em_equities", "intl_developed")]
+    total_intl = sum(adjusted.get(t, 0) for t in intl_tickers_list)
+    if total_intl > max_intl_pct:
+        excess_intl = total_intl - max_intl_pct
+        scale = max_intl_pct / total_intl
+        for t in intl_tickers_list:
+            if adjusted.get(t, 0) > 0:
+                adjusted[t] *= scale
+        _redistribute_excess(adjusted, excess_intl, exclude=set(intl_tickers_list))
+        logger.info("ETF quality: Intl total cap: %.1f%% -> %.1f%% (excess %.4f redistributed)",
+                    total_intl * 100, max_intl_pct * 100, excess_intl)
 
-    intl_classes = {"intl_developed", "em_equities"}
-    intl_tickers = [t for t, w in adjusted.items()
-                    if w > 0 and _get_asset_class(t) in intl_classes]
-    intl_total = sum(adjusted[t] for t in intl_tickers)
-    if intl_total > max_intl_pct:
-        scale = max_intl_pct / intl_total
-        excess = intl_total - max_intl_pct
-        for t in intl_tickers:
-            adjusted[t] *= scale
-        # Redistribute excess pro-rata across domestic equities
-        _redistribute_excess(adjusted, excess, exclude=set(intl_tickers))
-        logger.info("ETF quality: total intl %.1f%% > %.1f%% cap -- scaled down, "
-                    "excess redistributed to equities",
-                    intl_total * 100, max_intl_pct * 100)
-
-    # --- Normalize back to 1.0 ---
+    # Renormalize to sum=1
     total = sum(adjusted.values())
     if total > 0:
         adjusted = {t: w / total for t, w in adjusted.items()}
 
-    # --- Second-pass cap enforcement (normalization can re-inflate capped ETFs) ---
-    any_clipped = True
-    for _ in range(5):  # max 5 iterations to converge
-        any_clipped = False
-        for t in region_etfs:
-            if adjusted.get(t, 0) > max_region_pct + 1e-6:
-                excess = adjusted[t] - max_region_pct
-                adjusted[t] = max_region_pct
-                _redistribute_excess(adjusted, excess, exclude={t})
-                any_clipped = True
-        # Re-check country caps
-        country_etfs_final = [t for t in adjusted if t in country_etfs_set and adjusted[t] > max_country_pct + 1e-6]
-        for t in country_etfs_final:
-            excess = adjusted[t] - max_country_pct
-            adjusted[t] = max_country_pct
-            _redistribute_excess(adjusted, excess, exclude={t})
-            any_clipped = True
-        if any_clipped:
-            total = sum(adjusted.values())
-            if total > 0:
-                adjusted = {t: w / total for t, w in adjusted.items()}
-        else:
-            break
-
-    # Remove zero/near-zero weights
-    adjusted = {t: w for t, w in adjusted.items() if w > 0.001}
-
     return adjusted
 
+
+# ===========================================================================
+# 4. REGIME-AWARE ALLOCATION BANDS
+# ===========================================================================
 
 def _compute_allocation_bounds(
     tickers: List[str],
@@ -928,1124 +851,640 @@ def _compute_allocation_bounds(
     factor_scores: pd.DataFrame = None,
 ) -> Dict[str, Tuple[float, float]]:
     """
-    Compute per-ticker allocation bounds based on regime bands and factor scores.
+    Compute per-ticker (lo, hi) allocation bounds based on:
+      1. Regime-conditional band from config
+      2. Factor score tilt (top-quartile tickers get wider upper bound)
+      3. Feasibility clamp: sum of lower bounds <= 1.0
 
-    FIX 3: The old implementation took the GROUP band (e.g. us_equities
-    offense [0.55, 0.75]) and divided lo/hi equally among all tickers in
-    the group. When you have 8 asset classes whose lower bounds sum > 1.0,
-    the optimizer sees infeasible constraints.
-
-    NEW approach:
-      - Lower bound per-ticker = 0 (let the optimizer decide who gets weight)
-      - Upper bound per-ticker = group_hi / n_in_class (cap any single ticker)
-      - This guarantees sum of lower bounds = 0.0 (always feasible)
-      - The optimizer will naturally allocate within the asset class bands
-        because the sum of uppers caps each class
+    Returns dict of ticker -> (lo, hi).
     """
-    bands = cfg["optimizer"]["allocation_bands"]
+    # Load asset class bands from config
+    bands_cfg = cfg.get("allocation_bands", {})
+    regime_bands = bands_cfg.get(regime, bands_cfg.get("offense", {}))
+
+    # Default bounds
+    default_lo = 0.0
+    default_hi = 0.05
+
     bounds = {}
-
-    # Count tickers per asset class for splitting group budget
-    class_counts = {}
-    class_tickers = {}
-    for t in tickers:
-        ac = _get_asset_class(t)
-        class_counts[ac] = class_counts.get(ac, 0) + 1
-        class_tickers.setdefault(ac, []).append(t)
-
     for ticker in tickers:
         ac = _get_asset_class(ticker)
-        band = bands.get(ac, {"panic": [0, 0.05], "defense": [0.05, 0.15], "offense": [0.1, 0.3]})
-        regime_band = band.get(regime, band.get("offense", [0.05, 0.20]))
+        band = regime_bands.get(ac, {})
+        lo = band.get("min", default_lo)
+        hi = band.get("max", default_hi)
 
-        group_lo = regime_band[0]
-        group_hi = regime_band[1]
-        n_in_class = max(1, class_counts.get(ac, 1))
+        # Factor score tilt: top-quartile tickers get +2% upper bound
+        if factor_scores is not None and not factor_scores.empty:
+            match = factor_scores[factor_scores["ticker"] == ticker]
+            if not match.empty:
+                score = match["composite_score"].values[0]
+                if score >= 0.65:  # top quartile threshold
+                    hi = min(hi + 0.02, 0.15)  # cap at 15%
 
-        # Per-ticker lower bound = 0 (optimizer chooses freely within class)
-        # Per-ticker upper bound = group upper / n_in_class (prevent domination)
-        per_ticker_lo = 0.0
-        per_ticker_hi = group_hi / n_in_class
+        bounds[ticker] = (lo, hi)
 
-        # For small classes (1-2 tickers), allow the full group upper
-        if n_in_class <= 2:
-            per_ticker_hi = group_hi
-
-        # Boost upper bound for high-scoring tickers within the class
-        if factor_scores is not None and ticker in factor_scores["ticker"].values:
-            score = factor_scores.loc[factor_scores["ticker"] == ticker, "composite_score"].values[0]
-            # Top-scoring tickers get up to 2x their share of the class budget
-            if score > 0.6:
-                per_ticker_hi = min(per_ticker_hi * (1.0 + score), group_hi * 0.5)
-
-        # Ensure hi >= lo and clamp to [0, 1]
-        per_ticker_hi = max(per_ticker_lo, min(per_ticker_hi, 1.0))
-
-        bounds[ticker] = (round(per_ticker_lo, 6), round(per_ticker_hi, 6))
-
-    # ---- Feasibility validation ----
+    # --- Feasibility clamp ---
+    # If sum of lower bounds > 1.0, scale them down proportionally
     total_lo = sum(lo for lo, _ in bounds.values())
-    total_hi = sum(hi for _, hi in bounds.values())
     if total_lo > 1.0:
-        logger.error("INFEASIBLE: sum of lower bounds = %.4f > 1.0 -- scaling down", total_lo)
-        scale = 0.99 / total_lo
+        scale = 0.95 / total_lo  # leave 5% slack
+        logger.warning(
+            "Feasibility clamp: sum of lower bounds %.3f > 1.0 -- scaling by %.3f",
+            total_lo, scale,
+        )
         bounds = {t: (lo * scale, hi) for t, (lo, hi) in bounds.items()}
-    if total_hi < 1.0:
-        logger.warning("Sum of upper bounds = %.4f < 1.0 -- relaxing proportionally", total_hi)
-        scale = 1.01 / total_hi
-        bounds = {t: (lo, min(hi * scale, 1.0)) for t, (lo, hi) in bounds.items()}
-
-    logger.info("Allocation bounds: sum(lo)=%.4f, sum(hi)=%.4f (%d tickers)",
-                sum(lo for lo, _ in bounds.values()),
-                sum(hi for _, hi in bounds.values()),
-                len(bounds))
 
     return bounds
 
 
 # ===========================================================================
-# 4. US EQUITIES SUB-SECTOR ALLOCATION
+# 5. US EQUITIES SUB-SECTOR ALLOCATION (DeMiguel + valuation)
 # ===========================================================================
 
-def compute_bivector_beta(
-    returns: pd.DataFrame,
-    sector_ticker: str,
-    market_tickers: List[str] = None,
-    market_proxy: str = "SPY",
-    min_obs: int = 30,
-) -> float:
-    """
-    Compute Bivector Beta for a sector -- the degree of orthogonality
-    to the first principal component of the market factor.
-
-    Bivector Beta > 1.0 means the sector is a structural diversifier
-    (its returns are significantly different from the dominant market mode).
-    """
-    if sector_ticker not in returns.columns:
-        return 1.0
-
-    if market_tickers is None:
-        market_tickers = [c for c in returns.columns if c != sector_ticker]
-
-    if market_proxy and market_proxy in returns.columns and market_proxy != sector_ticker:
-        if market_proxy not in market_tickers:
-            market_tickers = market_tickers + [market_proxy]
-            logger.debug("Bivector Beta: added %s as market anchor for PCA", market_proxy)
-
-    candidate_cols = [c for c in market_tickers if c in returns.columns]
-    sector_notna = returns[sector_ticker].notna()
-    available = {}
-    for c in candidate_cols:
-        overlap = (sector_notna & returns[c].notna()).sum()
-        if overlap >= min_obs:
-            available[c] = overlap
-    candidate_cols = sorted(available, key=available.get, reverse=True)
-
-    if len(candidate_cols) < 2:
-        logger.info("Bivector Beta for %s: insufficient overlapping data, returning 1.0", sector_ticker)
-        return 1.0
-
-    clean = returns[[sector_ticker] + candidate_cols].dropna()
-    if clean.shape[0] < min_obs:
-        logger.info("Bivector Beta for %s: only %d rows after dropna, returning 1.0", sector_ticker, clean.shape[0])
-        return 1.0
-
-    from sklearn.decomposition import PCA
-
-    market_data = clean[candidate_cols].values
-    pca = PCA(n_components=1)
-    pca.fit(market_data)
-    pc1 = pca.transform(market_data).flatten()
-
-    sector_rets = clean[sector_ticker].values
-    corr = np.corrcoef(sector_rets, pc1)[0, 1]
-
-    bivector_beta = 1.0 / max(abs(corr), 0.01)
-    logger.info("Bivector Beta %s: corr=%.4f, beta_bv=%.4f (%d obs, %d market tickers)",
-                sector_ticker, corr, bivector_beta, clean.shape[0], len(candidate_cols))
-    return round(bivector_beta, 4)
-
-
-def apply_us_subsector_allocation(
-    sector_etfs: List[str],
-    factor_scores: pd.DataFrame,
-    us_equity_weight: float,
-    cfg: dict,
-    returns: pd.DataFrame = None,
-) -> Dict[str, dict]:
-    """
-    Allocate within US Equities using factor-score proportional tilting
-    (FIX A: replaces DeMiguel equal-weight).
-
-    Each US sector ETF's share of us_equity_weight is proportional to its
-    composite_score, with valuation filter overrides (MOMENTUM_ONLY gets
-    50% cap, AVOID gets 0).  Bivector Beta still boosts structural
-    diversifiers (XLE, XLB).
-
-    Returns dict of ticker -> {weight, label, bivector_beta, ...}
-    """
-    us_sectors = [t for t in sector_etfs if _get_asset_class(t) == "us_equities"]
-    n = len(us_sectors)
-    if n == 0:
-        return {}
-
-    equal_weight = us_equity_weight / n   # kept as reference / floor
-    val_cfg = cfg["factor_model"]["valuation"]
-    mom_cap = val_cfg["momentum_cap_fraction"]  # 0.50
-
-    energy_materials = [t for t in sector_etfs if _get_asset_class(t) == "energy_materials"]
-
-    # --- Pass 1: collect composite scores and labels ---
-    raw_scores: Dict[str, float] = {}
-    labels: Dict[str, str] = {}
-    bv_betas: Dict[str, float] = {}
-
-    for ticker in us_sectors:
-        row = factor_scores[factor_scores["ticker"] == ticker]
-        label = "FUNDAMENTAL_BUY"
-        score = 0.5   # neutral default
-
-        if not row.empty:
-            score = float(row["composite_score"].values[0])
-            mom   = float(row["momentum_rank"].values[0])
-            alpha = float(row["adjusted_alpha"].values[0])
-
-            if mom > 0.75 and alpha < 0:
-                label = "MOMENTUM_ONLY"
-            elif mom < 0.10 and alpha < -0.05:
-                label = "AVOID"
-
-        # Bivector Beta for energy/materials structural diversifiers
-        bv_beta = 1.0
-        if ticker in energy_materials and returns is not None:
-            sector_only_cols = [c for c in sector_etfs if c in returns.columns]
-            if sector_only_cols:
-                bv_beta = compute_bivector_beta(
-                    returns[sector_only_cols], ticker,
-                    market_tickers=[c for c in sector_only_cols if c != ticker],
-                )
-
-        raw_scores[ticker] = max(score, 0.01)  # floor prevents zero-div
-        labels[ticker] = label
-        bv_betas[ticker] = bv_beta
-
-    # --- Pass 2: compute proportional weights ---
-    # Shift scores: high-score ETFs get meaningfully more weight.
-    # Small base (0.02) prevents total starvation but widens the spread.
-    min_score = min(raw_scores.values())
-    shifted = {t: (s - min_score + 0.02) for t, s in raw_scores.items()}
-
-    # Apply label overrides before normalizing
-    for ticker in us_sectors:
-        if labels[ticker] == "AVOID":
-            shifted[ticker] = 0.0
-        elif labels[ticker] == "MOMENTUM_ONLY":
-            shifted[ticker] *= mom_cap   # halve its contribution
-
-    total_shifted = sum(shifted.values())
-    if total_shifted <= 0:
-        # Fallback: equal-weight the non-AVOID tickers
-        active = [t for t in us_sectors if labels[t] != "AVOID"]
-        total_shifted = len(active) or 1
-        shifted = {t: (1.0 if t in active else 0.0) for t in us_sectors}
-        total_shifted = sum(shifted.values()) or 1.0
-
-    result = {}
-    for ticker in us_sectors:
-        prop_weight = (shifted[ticker] / total_shifted) * us_equity_weight
-
-        result[ticker] = {
-            "weight": round(prop_weight, 6),
-            "label": labels[ticker],
-            "composite_score": round(raw_scores[ticker], 4),
-            "equal_weight_base": round(equal_weight, 6),
-            "bivector_beta": bv_betas[ticker],
-            "is_structural_diversifier": bv_betas[ticker] > 1.0 and ticker in energy_materials,
-        }
-
-    # Normalize so weights sum exactly to us_equity_weight
-    total = sum(v["weight"] for v in result.values())
-    if total > 0:
-        scale = us_equity_weight / total
-        for t in result:
-            result[t]["weight"] = round(result[t]["weight"] * scale, 6)
-
-    logger.info("US sub-sector allocation (factor-tilted): %s",
-                {t: f"{v['weight']:.4f} ({v['label']})" for t, v in result.items() if v['weight'] > 0})
-    return result
-
-
-# ===========================================================================
-# 4B. SCREENER INTEGRATION (FIX B)
-# ===========================================================================
-
-def _inject_screener_picks(
-    weights: Dict[str, float],
+def build_us_equity_sub_allocation(
+    us_weight: float,
+    conn: sqlite3.Connection,
     cfg: dict,
     regime: str,
-) -> Dict[str, float]:
-    """
-    Inject top screener stock picks into the portfolio as a Roth IRA
-    satellite sleeve.
-
-    Strategy:
-      - Reserve `roth_satellite_pct` (default 20%) of the Roth IRA for
-        individual stock picks from the screener's top-scored holdings.
-      - Pick the top `satellite_stock_count` (default 5) stocks, combining
-        candidates from ETF holdings screens (Part A) and watchlist ENTRY
-        signals, ranked by composite_score.
-      - Carve the satellite weight proportionally from Roth-bound ETF
-        positions (those already tagged for Roth placement).
-      - Each stock gets equal weight within the satellite sleeve.
-      - Only injects in Offense regime.
-      - Skips tickers already in the ETF weights.
-
-    The satellite stocks will be routed to Roth IRA by allocate_dollars()
-    since they are registered as individual stocks (not in _KNOWN_ETF_TICKERS).
-    """
-    if regime != "offense":
-        logger.info("Screener picks only injected in Offense regime -- skipping (regime=%s)", regime)
-        return weights
-
-    screener_path = Path(__file__).parent / "screener_output.json"
-    if not screener_path.exists():
-        logger.info("No screener_output.json found -- skipping screener injection")
-        return weights
-
-    try:
-        with open(screener_path) as f:
-            screener = json.load(f)
-    except Exception as e:
-        logger.warning("Failed to read screener_output.json: %s", e)
-        return weights
-
-    # --- Gather candidate stocks from all screener sources ---
-    candidates = []  # list of (ticker, composite_score, source)
-
-    # Source 1: ETF holdings screens (Part A) -- top stocks from overweight sectors
-    etf_screens = screener.get("etf_screens", {})
-    for etf, rows in etf_screens.items():
-        if isinstance(rows, list):
-            for row in rows:
-                ticker = row.get("ticker", "")
-                score = row.get("composite_score", 0)
-                label = row.get("valuation_label", "")
-                if ticker and label != "AVOID":
-                    candidates.append((ticker, score, f"sector_screen:{etf}"))
-
-    # Source 2: Watchlist ENTRY signals (Part C)
-    signals = screener.get("signals", {})
-    entries = signals.get("entry", [])
-    for entry in entries:
-        ticker = entry.get("ticker", "")
-        score = entry.get("composite_score", 0)
-        if ticker:
-            candidates.append((ticker, score, f"watchlist:{entry.get('watchlist', '')}"))
-
-    if not candidates:
-        logger.info("No screener candidates found -- no stock picks to inject")
-        return weights
-
-    # --- Deduplicate (keep highest score per ticker) ---
-    best_by_ticker: Dict[str, Tuple[float, str]] = {}
-    for ticker, score, source in candidates:
-        if ticker not in best_by_ticker or score > best_by_ticker[ticker][0]:
-            best_by_ticker[ticker] = (score, source)
-
-    # --- Filter out tickers already in ETF weights ---
-    available = [
-        (ticker, score, source)
-        for ticker, (score, source) in best_by_ticker.items()
-        if ticker not in weights and ticker not in _KNOWN_ETF_TICKERS
-    ]
-    available.sort(key=lambda x: x[1], reverse=True)
-
-    # --- Pick top N ---
-    sc_cfg = cfg.get("stock_screener", {})
-    n_picks = sc_cfg.get("satellite_stock_count", 5)
-    satellite_pct = sc_cfg.get("roth_satellite_pct", 0.20)
-    roth_value = cfg["portfolio"]["accounts"]["roth_ira"]["value"]
-    total_value = cfg["portfolio"]["total_value"]
-
-    picks = available[:n_picks]
-    if not picks:
-        logger.info("No eligible screener picks after filtering -- skipping")
-        return weights
-
-    # --- Calculate satellite weight as fraction of total portfolio ---
-    # satellite_pct is 20% of Roth, but weights are expressed as fraction of
-    # total portfolio. Convert: satellite_weight = satellite_pct * roth_value / total_value
-    satellite_total_weight = satellite_pct * roth_value / total_value
-    per_stock_weight = satellite_total_weight / len(picks)
-
-    # --- Carve satellite weight from existing Roth-bound positions ---
-    # Identify which current ETFs will likely land in Roth so we carve from them
-    roth_etf_candidates = []
-    high_div_sectors = set(cfg.get("tax_location", {}).get("high_dividend_sectors", []))
-    # Expand to include equivalents
-    _SECTOR_EQUIV = {
-        "XLU": ["FUTY", "VPU"], "XLP": ["FSTA", "VDC"],
-        "XLRE": ["FREL", "VNQ"],
-    }
-    for spdr, equivs in _SECTOR_EQUIV.items():
-        if spdr in high_div_sectors:
-            for eq in equivs:
-                high_div_sectors.add(eq)
-
-    for t, w in weights.items():
-        if w <= 0:
-            continue
-        # Positions likely going to Roth: high-dividend sectors, thematic, watchlist stocks
-        if t in high_div_sectors:
-            roth_etf_candidates.append(t)
-        elif _get_asset_class(t) in ("thematic", "industry_sub"):
-            roth_etf_candidates.append(t)
-
-    # If not enough Roth-bound ETFs, carve from smallest overall positions
-    if not roth_etf_candidates:
-        roth_etf_candidates = sorted(
-            [t for t, w in weights.items() if w > 0],
-            key=lambda t: weights[t]
-        )[:5]
-
-    # Carve proportionally from Roth-bound ETFs
-    total_roth_etf_weight = sum(weights[t] for t in roth_etf_candidates if t in weights)
-    if total_roth_etf_weight > 0:
-        for t in roth_etf_candidates:
-            if t in weights and weights[t] > 0:
-                share = weights[t] / total_roth_etf_weight
-                carve = satellite_total_weight * share
-                weights[t] = max(0.001, weights[t] - carve)
-    else:
-        # Fallback: carve equally from all positions
-        carve_per = satellite_total_weight / max(len(weights), 1)
-        for t in list(weights.keys()):
-            weights[t] = max(0.001, weights[t] - carve_per)
-
-    # --- Inject the picks ---
-    for ticker, score, source in picks:
-        weights[ticker] = per_stock_weight
-        # Register as individual stock in ASSET_CLASS_MAP
-        if ticker not in ASSET_CLASS_MAP:
-            ASSET_CLASS_MAP[ticker] = "individual_stock"
-        logger.info(
-            "Injected satellite pick: %s (%.2f%% = ~$%.0f in Roth, score=%.3f, from %s)",
-            ticker, per_stock_weight * 100,
-            per_stock_weight * total_value,
-            score, source,
-        )
-
-    # Re-normalize to 1.0
-    total = sum(weights.values())
-    if total > 0:
-        weights = {t: w / total for t, w in weights.items()}
-
-    logger.info(
-        "Satellite sleeve: %d stocks injected, %.1f%% of Roth ($%.0f), "
-        "~$%.0f per stock",
-        len(picks),
-        satellite_pct * 100,
-        satellite_total_weight * total_value,
-        per_stock_weight * total_value,
-    )
-
-    return weights
-
-
-# ===========================================================================
-# 5. DOLLAR ALLOCATION ENGINE
-# ===========================================================================
-
-def _concentrate_portfolio(
-    weights: Dict[str, float],
-    max_positions: int,
     factor_scores: pd.DataFrame = None,
 ) -> Dict[str, float]:
     """
-    FIX 5 + FIX C: Reduce position count for a $144K portfolio,
-    with reserved slots per asset class so that industry/thematic/
-    screener picks are not wiped out by the 2% floor.
+    Allocate the US equities sleeve using DeMiguel equal-weight as a base,
+    with valuation tilts from factor_scores if available.
 
-    Strategy:
-      1. Reserve at least 1 slot each for industry_sub, thematic,
-         and individual stocks (screener picks) if any exist
-      2. Keep all positions >= 2% weight (meaningful allocation)
-      3. Within reserved asset classes, keep the top-scored ticker
-         even if below 2%
-      4. Fill remaining slots with top-scored optionals
-      5. Redistribute weight from dropped positions proportionally
+    Returns dict of ticker -> dollar weight (sums to us_weight).
     """
-    if len(weights) <= max_positions:
-        return weights
+    us_tickers_cfg = cfg.get("tickers", {}).get("us_sector_etfs", [])
 
-    # Classify positions by asset class
-    RESERVED_CLASSES = {"industry_sub", "thematic"}
-    # Screener-injected individual stocks won't be in the original
-    # ASSET_CLASS_MAP, so anything not in the map is treated as an
-    # individual stock pick (also reserved)
-    INDIVIDUAL_SENTINEL = "__individual__"
+    # Use etf_selector if available
+    if _ETF_SELECTOR_AVAILABLE:
+        try:
+            selected = _get_etf_selections(cfg)
+            us_tickers = [
+                v for k, v in selected.items()
+                if _get_asset_class(v) in ("us_equities", "healthcare", "energy_materials", "industry_sub")
+            ]
+            if not us_tickers:
+                us_tickers = us_tickers_cfg
+        except Exception:
+            us_tickers = us_tickers_cfg
+    else:
+        us_tickers = us_tickers_cfg
 
-    per_class: Dict[str, list] = {}   # ac -> [(ticker, weight, fscore)]
-    for ticker, w in weights.items():
-        if w <= 0:
-            continue
-        ac = _get_asset_class(ticker)
-        # Check if this is an individual stock (screener satellite pick)
-        if ac == "individual_stock":
-            ac = INDIVIDUAL_SENTINEL
-        elif ac == "us_equities" and ticker not in _KNOWN_ETF_TICKERS:
-            # Could be a screener pick -- mark as individual
-            ac = INDIVIDUAL_SENTINEL
+    if not us_tickers:
+        logger.warning("No US sector ETFs configured.")
+        return {}
 
-        fscore = 0.5
-        if factor_scores is not None and not factor_scores.empty:
-            match = factor_scores[factor_scores["ticker"] == ticker]
-            if not match.empty:
-                fscore = match["composite_score"].values[0]
+    # Base: equal weight
+    n = len(us_tickers)
+    base_weights = {t: 1.0 / n for t in us_tickers}
 
-        per_class.setdefault(ac, []).append((ticker, w, fscore))
+    # Valuation tilt: tilt toward high-score tickers
+    if factor_scores is not None and not factor_scores.empty:
+        scores = {}
+        for t in us_tickers:
+            match = factor_scores[factor_scores["ticker"] == t]
+            scores[t] = match["composite_score"].values[0] if not match.empty else 0.5
 
-    # Sort each class by factor score descending
-    for ac in per_class:
-        per_class[ac].sort(key=lambda x: x[2], reverse=True)
+        # Blend equal-weight with score-weighted
+        score_sum = sum(scores.values())
+        if score_sum > 0:
+            score_weights = {t: s / score_sum for t, s in scores.items()}
+            tilt_factor = cfg.get("optimizer", {}).get("us_equity_tilt", 0.3)
+            blended = {
+                t: (1 - tilt_factor) * base_weights[t] + tilt_factor * score_weights[t]
+                for t in us_tickers
+            }
+            # Normalize
+            total = sum(blended.values())
+            base_weights = {t: w / total for t, w in blended.items()}
 
-    # --- Pass 1: Mandatory picks (>= 2% weight) ---
-    mandatory = {}
-    for ac, items in per_class.items():
-        for ticker, w, fs in items:
-            if w >= 0.02:
-                mandatory[ticker] = w
-
-    # --- Pass 2: Reserved best-of-class picks ---
-    reserved = {}
-    reserved_acs = RESERVED_CLASSES | {INDIVIDUAL_SENTINEL}
-    for ac in reserved_acs:
-        items = per_class.get(ac, [])
-        if items:
-            # Keep the top-scored ticker from this class even if < 2%
-            best_t, best_w, best_fs = items[0]
-            if best_t not in mandatory:
-                reserved[best_t] = best_w
-
-    # --- Pass 3: Fill remaining slots from optional pool ---
-    used = set(mandatory.keys()) | set(reserved.keys())
-    remaining_slots = max(0, max_positions - len(used))
-
-    optional = []
-    for ac, items in per_class.items():
-        for ticker, w, fs in items:
-            if ticker not in used and w > 0:
-                optional.append((ticker, w, fs))
-
-    optional.sort(key=lambda x: x[2], reverse=True)
-    kept_optional = {t: w for t, w, _ in optional[:remaining_slots]}
-
-    # --- Merge all ---
-    final = {**mandatory, **reserved, **kept_optional}
-
-    # Redistribute dropped weight proportionally
-    total_kept = sum(final.values())
-    if total_kept > 0 and total_kept < 0.999:
-        scale = 1.0 / total_kept
-        final = {t: w * scale for t, w in final.items()}
-
-    dropped = len(weights) - len(final)
-    if dropped > 0:
-        logger.info("Concentrated portfolio: %d -> %d positions (dropped %d), "
-                    "reserved %d class-champion slots (industry/thematic/individual)",
-                    len(weights), len(final), dropped, len(reserved))
-
-    return final
+    return {t: w * us_weight for t, w in base_weights.items()}
 
 
-def allocate_dollars(
-    weights: Dict[str, float],
-    cfg: dict,
-    subsector_info: Dict[str, dict] = None,
-) -> Dict[str, dict]:
+# ===========================================================================
+# 6. BIVECTOR BETA FOR ENERGY/MATERIALS
+# ===========================================================================
+
+def compute_bivector_betas(
+    returns: pd.DataFrame,
+    benchmark_returns: pd.Series,
+    energy_materials_tickers: List[str],
+) -> Dict[str, float]:
     """
-    Convert percentage weights to dollar amounts split across
-    Taxable Brokerage and Roth IRA per tax-location rules.
+    Compute bivector beta for Energy/Materials tickers.
 
-    Rules (from config):
-      Roth IRA first: individual thematic stocks, high-turnover,
-                      biotech/smallcap, momentum-tilt-only
-      Taxable: broad ETFs, geographic, cash, energy/materials, TLH candidates
-      Never split a single position across both accounts unless > $10K
+    Bivector beta captures the asymmetric sensitivity of commodity-linked
+    ETFs to market moves: they tend to amplify downside during risk-off
+    and provide inflation protection during risk-on.
 
-    Returns dict of ticker -> {
-        pct, total_dollars, taxable_dollars, roth_dollars, account, reason
-    }
+    Formula: beta_up = cov(r_i, r_m | r_m > 0) / var(r_m | r_m > 0)
+             beta_down = cov(r_i, r_m | r_m < 0) / var(r_m | r_m < 0)
+
+    Returns dict of ticker -> {"beta_up": x, "beta_down": y, "asymmetry": y-x}
     """
-    total_portfolio = cfg["portfolio"]["total_value"]  # 144000
-    taxable_cap = cfg["portfolio"]["accounts"]["taxable"]["value"]  # 100000
-    roth_cap = cfg["portfolio"]["accounts"]["roth_ira"]["value"]  # 44000
-    split_thresh = cfg["tax_location"]["split_threshold"]  # 10000
-
-    # Classify each position
-    roth_tickers = set()
-    taxable_tickers = set()
-
-    # Individual stock satellite picks -> Roth (highest growth potential = tax-free)
-    for t, ac in ASSET_CLASS_MAP.items():
-        if ac == "individual_stock":
-            roth_tickers.add(t)
-
-    # Watchlist tickers -> Roth
-    for key in ["watchlist_biotech", "watchlist_ai_software",
-                "watchlist_defense", "watchlist_green_materials",
-                "watchlist_semiconductors", "watchlist_energy_transition",
-                "watchlist_fintech"]:
-        for t in cfg["tickers"].get(key, []):
-            roth_tickers.add(t)
-
-    # Thematic ETFs -> Roth (high turnover)
-    for t in cfg["tickers"].get("thematic_etfs", []):
-        roth_tickers.add(t)
-
-    # Geographic ETFs -> Taxable (foreign tax credit)
-    # Includes legacy tickers from config + all Franklin FTSE alternatives
-    for t in cfg["tickers"].get("geographic_etfs", []):
-        taxable_tickers.add(t)
-    # Add auto-selector geographic candidates (Franklin FTSE series)
-    _GEOGRAPHIC_TICKERS = {"FLIN", "FLBR", "FLJP", "FLEU", "FLCH", "FLKR", "FLTW",
-                           "INDA", "EWZ", "EWJ", "EWY", "EWT", "VGK", "MCHI",
-                           "VWO", "IEMG", "EEM", "FXI", "KWEB", "INDY", "FEZ", "DXJ"}
-    for t in _GEOGRAPHIC_TICKERS:
-        taxable_tickers.add(t)
-
-    # Cash/bonds -> Taxable (includes auto-selected cash ticker like SGOV)
-    for t in _CASH_TICKERS | {"AGG", "TLT"}:
-        taxable_tickers.add(t)
-
-    # Energy/Materials ETFs -> Taxable (structural diversifier, low turnover)
-    # Includes auto-selected variants (FENY, FMAT, VDE, VAW)
-    energy_mat_tickers = {t for t, ac in ASSET_CLASS_MAP.items() if ac == "energy_materials"}
-    energy_mat_tickers.add("GLD")  # commodity bucket
-    for t in energy_mat_tickers:
-        taxable_tickers.add(t)
-
-    # === Dividend-yield-aware tax location (Taxable Yield Trap fix) ===
-    # High-dividend US sectors -> Roth (dividends taxed as ordinary income in taxable)
-    high_div_sectors = set(cfg.get("tax_location", {}).get("high_dividend_sectors", []))
-    # Map auto-selected equivalents: Fidelity/Vanguard sector ETFs inherit the
-    # same dividend routing as their SPDR counterparts (same underlying sectors)
-    _SECTOR_DIVIDEND_EQUIV = {
-        # High-dividend equivalents
-        "XLU": ["FUTY", "VPU"],   # Utilities ~2.8% yield
-        "XLP": ["FSTA", "VDC"],   # Consumer Staples ~2.6% yield
-        "XLRE": ["FREL", "VNQ"],  # Real Estate ~3.2% yield
-        # Growth/low-dividend equivalents
-        "XLI": ["FIDU", "VIS"],   # Industrials ~1.4% yield
-        "XLK": ["FTEC", "VGT"],   # Technology ~0.6% yield
-        "XLC": ["FCOM", "VOX"],   # Communication ~0.8% yield
-        "XLY": ["FDIS", "VCR"],   # Consumer Disc ~0.9% yield
-        "XLF": ["FNCL", "VFH"],   # Financials ~1.3% yield
-    }
-    for spdr, equivs in _SECTOR_DIVIDEND_EQUIV.items():
-        if spdr in high_div_sectors:
-            for eq in equivs:
-                high_div_sectors.add(eq)
-    for t in high_div_sectors:
-        roth_tickers.add(t)
-        taxable_tickers.discard(t)  # ensure no conflict
-
-    # Growth/appreciation US sectors -> Taxable (long-term cap gains taxed favorably)
-    growth_sectors = set(cfg.get("tax_location", {}).get("growth_sectors", []))
-    for spdr, equivs in _SECTOR_DIVIDEND_EQUIV.items():
-        if spdr in growth_sectors:
-            for eq in equivs:
-                growth_sectors.add(eq)
-    for t in growth_sectors:
-        taxable_tickers.add(t)
-        roth_tickers.discard(t)  # ensure no conflict
-
-    result = {}
-    roth_used = 0.0
-    taxable_used = 0.0
-
-    # Sort by dollar amount descending for better bin-packing
-    # BUT: process individual satellite stocks FIRST to guarantee Roth placement
-    satellite_positions = [(t, w) for t, w in weights.items() if ASSET_CLASS_MAP.get(t) == "individual_stock" and w > 0]
-    non_satellite_positions = [(t, w) for t, w in weights.items() if ASSET_CLASS_MAP.get(t) != "individual_stock" and w > 0]
-    # Satellite stocks first (by weight desc), then ETFs (by weight desc)
-    satellite_positions.sort(key=lambda x: x[1], reverse=True)
-    non_satellite_positions.sort(key=lambda x: x[1], reverse=True)
-    sorted_positions = satellite_positions + non_satellite_positions
-
-    for ticker, weight in sorted_positions:
-        if weight <= 0:
+    results = {}
+    for ticker in energy_materials_tickers:
+        if ticker not in returns.columns:
             continue
 
-        dollars = round(weight * total_portfolio, 2)
-        reason = ""
+        ri = returns[ticker].dropna()
+        rm = benchmark_returns.reindex(ri.index).dropna()
+        aligned = pd.concat([ri, rm], axis=1).dropna()
+        aligned.columns = ["ri", "rm"]
 
-        # Check subsector info for momentum-only labels
-        is_momentum_only = False
-        if subsector_info and ticker in subsector_info:
-            if subsector_info[ticker].get("label") == "MOMENTUM_ONLY":
-                is_momentum_only = True
-                roth_tickers.add(ticker)
+        up_mask = aligned["rm"] > 0
+        down_mask = aligned["rm"] < 0
 
-        # Determine account placement
-        if ticker in roth_tickers or is_momentum_only:
-            # Roth first
-            if ASSET_CLASS_MAP.get(ticker) == "individual_stock":
-                base_reason = "Roth: satellite stock pick (screener top-5, tax-free growth)"
-            elif ticker in high_div_sectors:
-                base_reason = "Roth: high-dividend sector (avoid taxable dividend drag)"
-            elif is_momentum_only:
-                base_reason = "Roth: momentum-only position (high turnover)"
-            else:
-                base_reason = "Roth: thematic/high-turnover position"
-            if roth_used + dollars <= roth_cap:
-                account = "roth_ira"
-                roth_dollars = dollars
-                taxable_dollars = 0.0
-                reason = base_reason
-                roth_used += dollars
-            elif dollars > split_thresh and roth_used < roth_cap and taxable_used < taxable_cap:
-                roth_avail = round(roth_cap - roth_used, 2)
-                taxable_avail = round(taxable_cap - taxable_used, 2)
-                roth_dollars = min(roth_avail, dollars)
-                taxable_dollars = min(taxable_avail, round(dollars - roth_dollars, 2))
-                account = "split"
-                reason = f"Split: ${roth_dollars:.0f} Roth + ${taxable_dollars:.0f} Taxable (exceeds ${split_thresh:,.0f})"
-                roth_used += roth_dollars
-                taxable_used += taxable_dollars
-            elif taxable_used + dollars <= taxable_cap:
-                account = "taxable"
-                taxable_dollars = dollars
-                roth_dollars = 0.0
-                reason = "Taxable: Roth capacity full"
-                taxable_used += dollars
-            else:
-                roth_avail = roth_cap - roth_used
-                taxable_avail = taxable_cap - taxable_used
-                if roth_avail >= taxable_avail:
-                    roth_dollars = min(dollars, roth_avail)
-                    taxable_dollars = min(round(dollars - roth_dollars, 2), taxable_avail)
-                else:
-                    taxable_dollars = min(dollars, taxable_avail)
-                    roth_dollars = min(round(dollars - taxable_dollars, 2), roth_avail)
-                if roth_dollars > 0 and taxable_dollars > 0:
-                    account = "split"
-                    reason = f"Split: capacity constrained (${roth_dollars:.0f} Roth + ${taxable_dollars:.0f} Taxable)"
-                elif roth_dollars > 0:
-                    account = "roth_ira"
-                    reason = "Roth: last available capacity"
-                else:
-                    account = "taxable"
-                    reason = "Taxable: last available capacity"
-                roth_used += roth_dollars
-                taxable_used += taxable_dollars
+        def _beta(mask):
+            sub = aligned[mask]
+            if len(sub) < 10:
+                return np.nan
+            cov = np.cov(sub["ri"].values, sub["rm"].values)
+            var_m = cov[1, 1]
+            return cov[0, 1] / var_m if var_m > 1e-10 else np.nan
 
-        elif ticker in taxable_tickers:
-            if ticker in growth_sectors:
-                base_tax_reason = "Taxable: growth sector (capital appreciation, low dividend)"
-            else:
-                base_tax_reason = "Taxable: geographic/cash/energy (foreign tax credit / low turnover)"
-            if taxable_used + dollars <= taxable_cap:
-                account = "taxable"
-                taxable_dollars = dollars
-                roth_dollars = 0.0
-                reason = base_tax_reason
-                taxable_used += dollars
-            elif roth_used + dollars <= roth_cap:
-                account = "roth_ira"
-                roth_dollars = dollars
-                taxable_dollars = 0.0
-                reason = "Roth: taxable capacity full"
-                roth_used += dollars
-            else:
-                taxable_avail = taxable_cap - taxable_used
-                roth_avail = roth_cap - roth_used
-                taxable_dollars = min(dollars, taxable_avail)
-                roth_dollars = min(round(dollars - taxable_dollars, 2), roth_avail)
-                if taxable_dollars > 0 and roth_dollars > 0:
-                    account = "split"
-                    reason = f"Split: capacity constrained (${taxable_dollars:.0f} Taxable + ${roth_dollars:.0f} Roth)"
-                elif taxable_dollars > 0:
-                    account = "taxable"
-                    reason = "Taxable: last available capacity"
-                else:
-                    account = "roth_ira"
-                    reason = "Roth: last available capacity"
-                taxable_used += taxable_dollars
-                roth_used += roth_dollars
+        beta_up = _beta(up_mask)
+        beta_down = _beta(down_mask)
+        asymmetry = (beta_down - beta_up) if (np.isfinite(beta_up) and np.isfinite(beta_down)) else np.nan
 
-        else:
-            # Default: broad ETF -> taxable (long-term hold)
-            if taxable_used + dollars <= taxable_cap:
-                account = "taxable"
-                taxable_dollars = dollars
-                roth_dollars = 0.0
-                reason = "Taxable: broad ETF, long-term hold"
-                taxable_used += dollars
-            elif roth_used + dollars <= roth_cap:
-                account = "roth_ira"
-                roth_dollars = dollars
-                taxable_dollars = 0.0
-                reason = "Roth: taxable overflow"
-                roth_used += dollars
-            else:
-                taxable_avail = taxable_cap - taxable_used
-                roth_avail = roth_cap - roth_used
-                taxable_dollars = min(dollars, taxable_avail)
-                roth_dollars = min(round(dollars - taxable_dollars, 2), roth_avail)
-                if taxable_dollars > 0 and roth_dollars > 0:
-                    account = "split"
-                    reason = f"Split: capacity constrained (${taxable_dollars:.0f} Taxable + ${roth_dollars:.0f} Roth)"
-                elif taxable_dollars > 0:
-                    account = "taxable"
-                    reason = "Taxable: last available capacity"
-                else:
-                    account = "roth_ira"
-                    reason = "Roth: last available capacity"
-                taxable_used += taxable_dollars
-                roth_used += roth_dollars
-
-        result[ticker] = {
-            "pct": round(weight * 100, 2),
-            "total_dollars": dollars,
-            "taxable_dollars": taxable_dollars,
-            "roth_dollars": roth_dollars,
-            "account": account,
-            "reason": reason,
+        results[ticker] = {
+            "beta_up": round(float(beta_up), 4) if np.isfinite(beta_up) else None,
+            "beta_down": round(float(beta_down), 4) if np.isfinite(beta_down) else None,
+            "asymmetry": round(float(asymmetry), 4) if np.isfinite(asymmetry) else None,
         }
 
+    return results
+
+
+# ===========================================================================
+# 7. INDIVIDUAL STOCK SCREENER INJECTION
+# ===========================================================================
+
+def _inject_screener_stocks(
+    weights: Dict[str, float],
+    cfg: dict,
+    conn: sqlite3.Connection,
+) -> Dict[str, float]:
+    """
+    Inject individual stock positions from the screener into the weight dict.
+
+    This runs AFTER all ETF filters and caps have been applied, so screener
+    stocks bypass quality filters (they have their own scoring pipeline).
+
+    Satellite sleeve size is controlled by cfg['screener']['satellite_pct'].
+    The ETF weights are scaled down proportionally to make room.
+
+    FIX: Was previously called before apply_etf_quality_filter, which caused
+    screener stocks to be treated as unknown ETFs and culled by the overlap
+    and country-cap logic.
+    """
+    screener_cfg = cfg.get("screener", {})
+    if not screener_cfg.get("enabled", False):
+        return weights
+
+    satellite_pct = screener_cfg.get("satellite_pct", 0.10)
+    max_stocks = screener_cfg.get("max_individual_stocks", 10)
+    min_score = screener_cfg.get("min_composite_score", 0.60)
+
+    # Load top-ranked stocks from screener table
+    try:
+        query = """
+            SELECT ticker, composite_score, sector
+            FROM screener_results
+            WHERE composite_score >= ?
+            ORDER BY composite_score DESC
+            LIMIT ?
+        """
+        rows = conn.execute(query, (min_score, max_stocks)).fetchall()
+    except Exception as e:
+        logger.warning("Screener injection: DB query failed: %s", e)
+        return weights
+
+    if not rows:
+        logger.info("Screener injection: no stocks meet min_score=%.2f threshold", min_score)
+        return weights
+
+    stock_tickers = [r[0] for r in rows]
+    stock_scores = {r[0]: r[1] for r in rows}
+
+    # Allocate satellite_pct evenly across screener stocks (score-weighted option below)
+    total_score = sum(stock_scores.values())
+    if total_score > 0:
+        raw_alloc = {t: (stock_scores[t] / total_score) * satellite_pct for t in stock_tickers}
+    else:
+        raw_alloc = {t: satellite_pct / len(stock_tickers) for t in stock_tickers}
+
+    # Scale down existing ETF weights to make room
+    etf_total = sum(w for t, w in weights.items() if t not in stock_tickers)
+    if etf_total > 0:
+        scale = (1.0 - satellite_pct) / etf_total if etf_total > (1.0 - satellite_pct) else 1.0
+        scaled_weights = {t: w * scale for t, w in weights.items() if t not in stock_tickers}
+    else:
+        scaled_weights = {t: w for t, w in weights.items()}
+
+    merged = {**scaled_weights, **raw_alloc}
+
+    # Renormalize
+    total = sum(merged.values())
+    if total > 0:
+        merged = {t: w / total for t, w in merged.items()}
+
     logger.info(
-        "Dollar allocation: $%.0f taxable ($%.0f cap), $%.0f Roth ($%.0f cap)",
-        taxable_used, taxable_cap, roth_used, roth_cap,
+        "Screener injection: %d stocks injected (satellite=%.1f%%), ETF weights scaled by %.3f",
+        len(stock_tickers), satellite_pct * 100, scale if etf_total > 0 else 1.0,
+    )
+    return merged
+
+
+# ===========================================================================
+# 8. DOLLAR ALLOCATION ACROSS ACCOUNTS
+# ===========================================================================
+
+def allocate_across_accounts(
+    weights: Dict[str, float],
+    taxable_value: float,
+    roth_value: float,
+    cfg: dict,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Split portfolio weights across Taxable and Roth IRA accounts.
+
+    Tax-location rules:
+      - Tax-inefficient assets (bonds, REITs, high-yield) -> Roth
+      - Tax-efficient growth assets -> Taxable
+      - Cash/short-duration -> proportional split
+
+    Returns {"taxable": {ticker: dollars}, "roth": {ticker: dollars}}
+    """
+    tax_inefficient = set(cfg.get("tax_location", {}).get("roth_preferred", [
+        "AGG", "TLT", "XLRE", "VNQ", "FREL", "BIL", "SGOV", "SHV",
+    ]))
+
+    total_value = taxable_value + roth_value
+    taxable_frac = taxable_value / total_value if total_value > 0 else 0.5
+    roth_frac = roth_value / total_value if total_value > 0 else 0.5
+
+    taxable_alloc = {}
+    roth_alloc = {}
+
+    for ticker, weight in weights.items():
+        dollar_amount = weight * total_value
+        ac = _get_asset_class(ticker)
+
+        if ticker in tax_inefficient or ac == "cash_short_duration":
+            # Prefer Roth for tax-inefficient
+            roth_alloc[ticker] = dollar_amount
+        else:
+            # Prefer taxable for growth assets
+            taxable_alloc[ticker] = dollar_amount
+
+    # If Roth allocation exceeds Roth account value, overflow to taxable
+    roth_total = sum(roth_alloc.values())
+    if roth_total > roth_value and roth_value > 0:
+        overflow = roth_total - roth_value
+        # Move smallest Roth positions to taxable until within capacity
+        sorted_roth = sorted(roth_alloc.items(), key=lambda x: x[1])
+        moved = 0
+        for t, amt in sorted_roth:
+            if moved >= overflow:
+                break
+            move_amt = min(amt, overflow - moved)
+            roth_alloc[t] -= move_amt
+            taxable_alloc[t] = taxable_alloc.get(t, 0) + move_amt
+            moved += move_amt
+            if roth_alloc[t] <= 0:
+                del roth_alloc[t]
+
+    return {"taxable": taxable_alloc, "roth": roth_alloc}
+
+
+# ===========================================================================
+# 9. MAIN PORTFOLIO CONSTRUCTION PIPELINE
+# ===========================================================================
+
+def build_portfolio(
+    conn: sqlite3.Connection,
+    cfg: dict,
+    regime: str,
+    taxable_value: float = 0.0,
+    roth_value: float = 0.0,
+    ff_factors: pd.DataFrame = None,
+) -> dict:
+    """
+    End-to-end portfolio construction pipeline.
+
+    Order of operations:
+      1. Compute Fama-French factor scores
+      2. Load full return history (sector ETFs + any screener universe)
+      3. Run CVaR optimization with regime bands
+      4. Apply ETF quality filter (expense ratio, overlap, EM caps)
+      5. Inject screener satellite stocks  <-- MOVED HERE (after quality filter)
+      6. Compute bivector betas for Energy/Materials
+      7. Allocate across Taxable / Roth accounts
+      8. Persist results to DB
+
+    Returns a rich result dict with weights, diagnostics, account allocations.
+    """
+    logger.info("=== Portfolio Build: regime=%s, taxable=$%.0f, roth=$%.0f ===",
+                regime, taxable_value, roth_value)
+
+    # --- Step 1: Factor scores ---
+    factor_scores = compute_composite_factor_scores(conn, cfg, ff_factors)
+    if factor_scores.empty:
+        logger.warning("No factor scores computed -- proceeding with empty scores")
+
+    # --- Step 2: Load returns ---
+    from regime_detector import load_sector_prices
+    prices_wide = load_sector_prices(conn, cfg)
+    if prices_wide.empty:
+        logger.error("No price data available for portfolio construction.")
+        return {"error": "no_price_data", "weights": {}, "account_allocation": {}}
+
+    log_returns = np.log(prices_wide / prices_wide.shift(1)).dropna()
+
+    # --- Step 3: CVaR optimization ---
+    raw_weights = run_cvar_optimization(
+        log_returns,
+        regime=regime,
+        cfg=cfg,
+        factor_scores=factor_scores,
+    )
+
+    if not raw_weights:
+        logger.error("CVaR optimization returned empty weights.")
+        return {"error": "optimization_failed", "weights": {}, "account_allocation": {}}
+
+    # --- Step 4: ETF quality filter ---
+    filtered_weights = apply_etf_quality_filter(raw_weights, cfg)
+
+    # --- Step 5: Screener satellite injection (AFTER quality filter) ---
+    final_weights = _inject_screener_stocks(filtered_weights, cfg, conn)
+
+    # --- Step 6: Bivector betas ---
+    em_tickers = cfg.get("tickers", {}).get("geographic_etfs", [])
+    energy_mat_tickers = [
+        t for t, ac in ASSET_CLASS_MAP.items()
+        if ac == "energy_materials" and t in log_returns.columns
+    ]
+    spy_returns = log_returns.get("SPY", log_returns.iloc[:, 0])
+    bivector_betas = compute_bivector_betas(log_returns, spy_returns, energy_mat_tickers)
+
+    # --- Step 7: Account allocation ---
+    account_alloc = allocate_across_accounts(
+        final_weights, taxable_value, roth_value, cfg
+    ) if (taxable_value + roth_value) > 0 else {}
+
+    # --- Step 8: Persist ---
+    _persist_portfolio(conn, final_weights, regime, cfg)
+
+    result = {
+        "weights": final_weights,
+        "regime": regime,
+        "factor_scores": factor_scores.to_dict("records") if not factor_scores.empty else [],
+        "bivector_betas": bivector_betas,
+        "account_allocation": account_alloc,
+        "n_positions": sum(1 for w in final_weights.values() if w > 0.001),
+        "build_timestamp": dt.datetime.utcnow().isoformat(),
+    }
+
+    logger.info(
+        "Portfolio built: %d positions, top-5: %s",
+        result["n_positions"],
+        sorted(final_weights.items(), key=lambda x: x[1], reverse=True)[:5],
     )
     return result
 
 
-# ===========================================================================
-# 6. MASTER ALLOCATION PIPELINE
-# ===========================================================================
-
-def run_portfolio_optimization(
-    conn: sqlite3.Connection = None,
-    cfg: dict = None,
-    regime: str = None,
-) -> dict:
-    """
-    Master function: run the full portfolio optimization pipeline.
-
-    1. Load current regime from DB (or accept override)
-    2. Compute factor scores for all sector ETFs
-    3. Load prices for optimization universe
-    4. Run CVaR optimization with regime bands
-    5. Apply US sub-sector allocation
-    6. Concentrate portfolio to max_positions
-    7. Convert to dollar amounts across accounts
-    8. Output JSON + CSV
-
-    Returns the complete allocation dict.
-    """
-    if cfg is None:
-        cfg = load_config()
-
-    close_conn = False
-    if conn is None:
-        conn = sqlite3.connect(str(DB_PATH))
-        close_conn = True
-
-    # --- Step 1: Get current regime ---
-    if regime is None:
-        from regime_detector import get_latest_regime_state
-        state = get_latest_regime_state(conn, cfg)
-        regime = state.get("dominant_regime", "offense")
-    logger.info("Optimizing for regime: %s", regime)
-
-    # --- Step 2: Factor scores ---
-    logger.info("Computing factor scores...")
-    ff_factors = download_ff_factors()
-    factor_scores = compute_composite_factor_scores(conn, cfg, ff_factors)
-    if factor_scores.empty:
-        logger.error("Factor scoring failed -- cannot optimize.")
-        if close_conn:
-            conn.close()
-        return {}
-
-    logger.info("Top factor scores:\n%s", factor_scores.head(5).to_string())
-
-    # --- Step 3: Load price returns for optimization ---
-    # Use auto-selected tickers when available
-    sector_tickers = cfg["tickers"]["sector_etfs"]
-    geo_tickers = cfg["tickers"]["geographic_etfs"]
-    industry_tickers = cfg["tickers"].get("industry_etfs", [])
-    thematic_tickers = cfg["tickers"].get("thematic_etfs", [])
-
-    # Resolve best-in-class cash ticker from ETF selector (default SGOV)
-    if _ETF_SELECTOR_AVAILABLE:
-        etf_selections = _get_etf_selections(cfg)
-        cash_ticker = etf_selections.get("cash_tbill", "SGOV")
-        logger.info("ETF selector: cash ticker = %s", cash_ticker)
-    else:
-        cash_ticker = "SGOV"  # default to SGOV (cheapest)
-
-    cash_tickers = [cash_ticker]
-    all_opt_tickers = sector_tickers + geo_tickers + industry_tickers + thematic_tickers + cash_tickers
-    # Deduplicate while preserving order
-    seen = set()
-    all_opt_tickers = [t for t in all_opt_tickers if not (t in seen or seen.add(t))]
-    logger.info("Optimization universe: %d tickers", len(all_opt_tickers))
-
-    placeholders = ",".join(["?"] * len(all_opt_tickers))
-    prices = pd.read_sql_query(
-        f"SELECT date, ticker, adj_close FROM prices WHERE ticker IN ({placeholders}) ORDER BY date",
-        conn, params=all_opt_tickers,
-    )
-
-    if prices.empty:
-        logger.error("No prices for optimization universe.")
-        if close_conn:
-            conn.close()
-        return {}
-
-    wide = prices.pivot(index="date", columns="ticker", values="adj_close")
-    wide.index = pd.to_datetime(wide.index)
-    wide = wide.sort_index().ffill().dropna(axis=1, how="all")
-
-    returns = np.log(wide / wide.shift(1)).dropna()
-
-    # --- Step 4: CVaR optimization ---
-    logger.info("Running CVaR optimization...")
-    weights = run_cvar_optimization(
-        returns, regime, cfg,
-        factor_scores=factor_scores,
-        em_tickers=geo_tickers,
-    )
-
-    if not weights:
-        logger.error("Optimization returned empty weights.")
-        if close_conn:
-            conn.close()
-        return {}
-
-    # --- Step 5: US sub-sector allocation ---
-    us_weight = sum(w for t, w in weights.items() if _get_asset_class(t) == "us_equities")
-    subsector = apply_us_subsector_allocation(
-        sector_tickers, factor_scores, us_weight, cfg, returns,
-    )
-
-    # Update weights with sub-sector detail
-    for ticker, info in subsector.items():
-        if ticker in weights:
-            weights[ticker] = info["weight"]
-
-    # Normalize weights to sum to 1.0
-    total_w = sum(weights.values())
-    if total_w > 0:
-        weights = {t: w / total_w for t, w in weights.items()}
-    else:
-        logger.error("All weights are zero after sub-sector allocation -- cannot allocate dollars.")
-        if close_conn:
-            conn.close()
-        return {}
-
-    # --- Step 5.5: Inject screener stock picks (FIX B) ---
-    weights = _inject_screener_picks(weights, cfg, regime)
-
-    # --- Step 5.6: Concentrate portfolio (FIX 5) ---
-    max_positions = cfg.get("optimizer", {}).get("max_positions", 15)
-    weights = _concentrate_portfolio(weights, max_positions, factor_scores)
-
-    # --- Step 5.7: ETF structural quality filter (Phase 11 Enhancement) ---
-    logger.info("Applying ETF quality filter (expense ratios, overlap, caps)...")
-    weights = apply_etf_quality_filter(weights, cfg)
-    logger.info("Post-quality weights: %d positions", sum(1 for w in weights.values() if w > 0.001))
-
-    # --- Step 5.8: Minimum position size enforcement ---
-    min_pct = cfg.get("optimizer", {}).get("min_position_pct", 0) / 100.0
-    if min_pct > 0:
-        dropped = []
-        for _ in range(10):  # iterate until no sub-minimum positions remain
-            sub_min = {t: w for t, w in weights.items()
-                       if 0 < w < min_pct and t not in _CASH_TICKERS}
-            if not sub_min:
-                break
-            total_excess = sum(sub_min.values())
-            for t in sub_min:
-                dropped.append((t, weights[t]))
-                weights[t] = 0.0
-            # Redistribute pro-rata across remaining equity positions
-            _redistribute_excess(weights, total_excess, exclude=set(sub_min.keys()))
-            # Re-normalize
-            total_w = sum(weights.values())
-            if total_w > 0:
-                weights = {t: w / total_w for t, w in weights.items()}
-            # Remove zeroed entries
-            weights = {t: w for t, w in weights.items() if w > 0.001}
-        if dropped:
-            logger.info("Min position filter: dropped %d positions below %.1f%%: %s",
-                        len(dropped), min_pct * 100,
-                        ", ".join(f"{t} ({w*100:.1f}%)" for t, w in dropped))
-        logger.info("Post-min-filter: %d positions", len(weights))
-
-        # Re-apply quality caps since redistribution may have inflated capped ETFs
-        weights = apply_etf_quality_filter(weights, cfg)
-
-    # --- Step 5.9: ETF ticker substitution (auto-selector) ---
-    # Replace SPDR/legacy tickers with auto-selected best-in-class ETFs.
-    # Optimization runs on SPDR tickers (which have price history in DB),
-    # but final allocation uses the cheapest equivalent (e.g., XLK -> FTEC).
-    if _ETF_SELECTOR_AVAILABLE:
-        _SLOT_TO_LEGACY = {
-            "us_technology": "XLK", "us_healthcare": "XLV", "us_financials": "XLF",
-            "us_industrials": "XLI", "us_consumer_disc": "XLY",
-            "us_consumer_staples": "XLP", "us_energy": "XLE", "us_materials": "XLB",
-            "us_utilities": "XLU", "us_real_estate": "XLRE",
-            "us_communication": "XLC",
-            "india": "INDA", "brazil": "EWZ", "japan": "EWJ",
-            "europe": "VGK", "china": "MCHI", "south_korea": "EWY",
-            "taiwan": "EWT", "broad_em": "VWO",
-            "cash_tbill": "BIL",
-        }
-        # Build reverse: legacy_ticker -> selected_ticker
-        etf_subs = {}
-        for slot, legacy in _SLOT_TO_LEGACY.items():
-            selected = etf_selections.get(slot)
-            if selected and selected != legacy:
-                etf_subs[legacy] = selected
-
-        if etf_subs:
-            new_weights = {}
-            for t, w in weights.items():
-                new_t = etf_subs.get(t, t)
-                new_weights[new_t] = new_weights.get(new_t, 0) + w
-            weights = new_weights
-            logger.info("ETF substitution: %s",
-                        ", ".join(f"{old}->{new}" for old, new in sorted(etf_subs.items())))
-
-    # --- Step 6: Dollar allocation ---
-    logger.info("Computing dollar allocation...")
-    dollar_alloc = allocate_dollars(weights, cfg, subsector)
-
-    # --- Build output ---
-    allocation = {
-        "date": dt.date.today().isoformat(),
-        "regime": regime,
-        "total_portfolio": cfg["portfolio"]["total_value"],
-        "taxable_account": cfg["portfolio"]["accounts"]["taxable"]["value"],
-        "roth_ira_account": cfg["portfolio"]["accounts"]["roth_ira"]["value"],
-        "positions": dollar_alloc,
-        "factor_scores": factor_scores.to_dict(orient="records"),
-        "subsector_detail": {t: v for t, v in subsector.items()},
-    }
-
-    # Save JSON
-    json_path = Path(__file__).parent / "current_allocation.json"
-    with open(json_path, "w") as f:
-        json.dump(allocation, f, indent=2, default=str)
-    logger.info("Allocation JSON saved to %s", json_path)
-
-    # Save CSV
-    csv_path = Path(__file__).parent / "current_allocation.csv"
-    rows = []
-    for ticker, info in dollar_alloc.items():
-        rows.append({
-            "ticker": ticker,
-            "weight_pct": info["pct"],
-            "total_dollars": info["total_dollars"],
-            "taxable_dollars": info["taxable_dollars"],
-            "roth_dollars": info["roth_dollars"],
-            "account": info["account"],
-            "reason": info["reason"],
-        })
-    pd.DataFrame(rows).to_csv(csv_path, index=False)
-    logger.info("Allocation CSV saved to %s", csv_path)
-
-    # Store in DB
-    now = dt.datetime.utcnow().isoformat()
-    conn.execute(
-        "INSERT OR REPLACE INTO allocations (date, regime, allocation_json, dollar_taxable, dollar_roth, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            dt.date.today().isoformat(),
-            regime,
-            json.dumps(dollar_alloc, default=str),
-            json.dumps({t: v["taxable_dollars"] for t, v in dollar_alloc.items()}),
-            json.dumps({t: v["roth_dollars"] for t, v in dollar_alloc.items()}),
-            now,
-        ),
-    )
-    conn.commit()
-    logger.info("Allocation stored in database.")
-
-    if close_conn:
-        conn.close()
-
-    return allocation
+def _persist_portfolio(
+    conn: sqlite3.Connection,
+    weights: Dict[str, float],
+    regime: str,
+    cfg: dict,
+) -> None:
+    """Persist portfolio weights to SQLite for audit trail."""
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS portfolio_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                regime TEXT,
+                ticker TEXT,
+                weight REAL
+            )
+        """)
+        ts = dt.datetime.utcnow().isoformat()
+        rows = [(ts, regime, t, w) for t, w in weights.items() if w > 0.0001]
+        conn.executemany(
+            "INSERT INTO portfolio_history (timestamp, regime, ticker, weight) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        logger.info("Persisted %d portfolio rows to DB", len(rows))
+    except Exception as e:
+        logger.warning("Failed to persist portfolio: %s", e)
 
 
 # ===========================================================================
-# CLI ENTRY POINT
+# 10. CLI / SMOKE TEST
 # ===========================================================================
-if __name__ == "__main__":
-    import sys
-    import argparse
 
-    parser = argparse.ArgumentParser(description="Phase 3: Factor Scoring & CVaR Portfolio Optimizer")
-    parser.add_argument("--mock", action="store_true",
-                        help="Use synthetic data if DB is empty or missing (for initial setup/CI)")
-    parser.add_argument("--regime", choices=["offense", "defense", "panic"],
-                        default=None, help="Override regime (default: read from DB)")
-    args = parser.parse_args()
+def _smoke_test() -> None:
+    """Quick smoke test: build a portfolio with synthetic data."""
+    import tempfile
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    if args.mock:
-        logger.info("--mock mode: generating synthetic price data")
-        # Generate synthetic DB if empty
-        conn = sqlite3.connect(str(DB_PATH))
-        row_count = conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
-        if row_count == 0:
-            logger.info("DB empty -- seeding synthetic sector prices for smoke testing")
-            cfg = load_config()
-            dates = pd.bdate_range(end=dt.date.today(), periods=600)
-            np.random.seed(42)
-            mock_rows = []
-            all_mock_tickers = (cfg["tickers"]["sector_etfs"] +
-                                cfg["tickers"]["geographic_etfs"] + ["SGOV", "BIL", "SPY"])
-            for ticker in all_mock_tickers:
-                base = np.random.uniform(30, 200)
-                prices = base * np.exp(np.cumsum(np.random.normal(0.0003, 0.015, len(dates))))
-                for d, p in zip(dates, prices):
-                    mock_rows.append((d.strftime("%Y-%m-%d"), ticker, p, p, p * 0.99, p, p, int(np.random.uniform(1e6, 5e6))))
-            conn.executemany(
-                "INSERT OR IGNORE INTO prices (date, ticker, open, high, low, close, adj_close, volume) VALUES (?,?,?,?,?,?,?,?)",
-                mock_rows,
+    # Minimal config
+    cfg = {
+        "factor_model": {
+            "mclean_pontiff_decay": 0.74,
+            "rolling_window_months": 36,
+            "momentum": {"lookback_months": 12, "skip_months": 1},
+        },
+        "optimizer": {
+            "cvar_confidence": 0.95,
+            "tail_correlation_percentile": 10,
+            "max_positions": 15,
+            "us_equity_tilt": 0.3,
+        },
+        "allocation_bands": {
+            "offense": {
+                "us_equities": {"min": 0.0, "max": 0.08},
+                "healthcare": {"min": 0.0, "max": 0.06},
+                "energy_materials": {"min": 0.0, "max": 0.05},
+                "industry_sub": {"min": 0.0, "max": 0.04},
+                "thematic": {"min": 0.0, "max": 0.03},
+                "intl_developed": {"min": 0.0, "max": 0.05},
+                "em_equities": {"min": 0.0, "max": 0.04},
+                "cash_short_duration": {"min": 0.0, "max": 0.02},
+            }
+        },
+        "tickers": {
+            "us_sector_etfs": ["XLK", "XLV", "XLE", "XLF", "XLI"],
+            "geographic_etfs": ["EEM", "VWO", "IEMG"],
+        },
+        "etf_quality": {
+            "expense_ratios_bps": {"ARKK": 75},
+            "expense_penalty_factor": 2.0,
+            "max_expense_ratio_bps": 50,
+            "overlap_groups": {},
+            "max_single_country_pct": 8.0,
+            "max_em_total_pct": 20.0,
+            "max_intl_total_pct": 35.0,
+            "offense_exclude": [],
+        },
+        "tax_location": {"roth_preferred": ["AGG", "TLT", "XLRE"]},
+        "screener": {"enabled": False},
+    }
+
+    # Create in-memory DB with synthetic price data
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE prices (
+            date TEXT, ticker TEXT, adj_close REAL
+        )
+    """)
+
+    # 3 years of daily prices for a small universe
+    tickers = ["XLK", "XLV", "XLE", "XLF", "XLI", "EEM", "VWO", "BIL", "SGOV", "SPY"]
+    dates = pd.bdate_range("2021-01-01", "2023-12-31")
+    np.random.seed(99)
+    rows = []
+    for t in tickers:
+        price = 100.0
+        drift = np.random.uniform(0.0001, 0.0004)
+        vol = np.random.uniform(0.008, 0.015)
+        for d in dates:
+            price *= np.exp(np.random.normal(drift, vol))
+            rows.append((d.strftime("%Y-%m-%d"), t, round(price, 4)))
+    conn.executemany("INSERT INTO prices VALUES (?, ?, ?)", rows)
+    conn.commit()
+
+    result = build_portfolio(
+        conn=conn,
+        cfg=cfg,
+        regime="offense",
+        taxable_value=100_000,
+        roth_value=50_000,
+    )
+
+    print("\n=== SMOKE TEST RESULTS ===")
+    print(f"Regime: {result.get('regime')}")
+    print(f"Positions: {result.get('n_positions')}")
+    print("\nWeights (non-zero):")
+    for t, w in sorted(result.get("weights", {}).items(), key=lambda x: x[1], reverse=True):
+        if w > 0.001:
+            print(f"  {t:<8} {w:>6.2%}")
+
+    acct = result.get("account_allocation", {})
+    if acct:
+        print("\nTaxable allocation (top 5):")
+        for t, d in sorted(acct.get("taxable", {}).items(), key=lambda x: x[1], reverse=True)[:5]:
+            print(f"  {t:<8} ${d:>9,.0f}")
+        print("Roth allocation (top 5):")
+        for t, d in sorted(acct.get("roth", {}).items(), key=lambda x: x[1], reverse=True)[:5]:
+            print(f"  {t:<8} ${d:>9,.0f}")
+
+    conn.close()
+    print("\nSmoke test PASSED")
+
+
+# ===========================================================================
+# 11. REPORTING
+# ===========================================================================
+
+def generate_portfolio_report(
+    result: dict,
+    taxable_value: float = 0.0,
+    roth_value: float = 0.0,
+) -> str:
+    """
+    Generate a human-readable text report from a build_portfolio() result dict.
+    """
+    lines = []
+    lines.append("=" * 72)
+    lines.append("GLOBAL SECTOR ROTATION SYSTEM -- PORTFOLIO REPORT")
+    lines.append(f"Generated: {result.get('build_timestamp', 'N/A')}")
+    lines.append(f"Regime: {result.get('regime', 'N/A').upper()}")
+    lines.append(f"Positions: {result.get('n_positions', 0)}")
+    lines.append("=" * 72)
+
+    weights = result.get("weights", {})
+    if weights:
+        lines.append("\nPORTFOLIO WEIGHTS")
+        lines.append(f"  {'Ticker':<8} {'Weight':>7}  {'Asset Class':<25}")
+        lines.append("  " + "-" * 45)
+        total_w = sum(weights.values())
+        for t, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
+            if w > 0.001:
+                ac = _get_asset_class(t)
+                lines.append(f"  {t:<8} {w:>6.2%}   {ac:<25}")
+        lines.append(f"  {'TOTAL':<8} {total_w:>6.2%}")
+
+    acct = result.get("account_allocation", {})
+    total_value = taxable_value + roth_value
+    if acct and total_value > 0:
+        lines.append("\nACCOUNT ALLOCATION")
+        for acct_name in ["taxable", "roth"]:
+            acct_alloc = acct.get(acct_name, {})
+            if not acct_alloc:
+                continue
+            acct_total = sum(acct_alloc.values())
+            lines.append(f"\n  {acct_name.upper()} (${acct_total:,.0f})")
+            lines.append(f"  {'Ticker':<8} {'$Amount':>10}  {'%Portfolio':>10}")
+            lines.append("  " + "-" * 35)
+            for t, d in sorted(acct_alloc.items(), key=lambda x: x[1], reverse=True):
+                if d > 0:
+                    pct = d / total_value
+                    lines.append(f"  {t:<8} ${d:>9,.0f}  {pct:>9.2%}")
+
+    betas = result.get("bivector_betas", {})
+    if betas:
+        lines.append("\nBIVECTOR BETAS (Energy/Materials)")
+        lines.append(f"  {'Ticker':<8} {'Beta Up':>8} {'Beta Down':>10} {'Asymmetry':>10}")
+        lines.append("  " + "-" * 45)
+        for t, b in sorted(betas.items()):
+            bu = f"{b['beta_up']:.3f}" if b.get("beta_up") is not None else "N/A"
+            bd = f"{b['beta_down']:.3f}" if b.get("beta_down") is not None else "N/A"
+            asym = f"{b['asymmetry']:.3f}" if b.get("asymmetry") is not None else "N/A"
+            lines.append(f"  {t:<8} {bu:>8} {bd:>10} {asym:>10}")
+
+    fs = result.get("factor_scores", [])
+    if fs:
+        lines.append("\nFACTOR SCORES (Top 10)")
+        lines.append(f"  {'Ticker':<8} {'Composite':>10} {'Alpha(ann)':>12} {'Mom Rank':>10}")
+        lines.append("  " + "-" * 47)
+        for row in fs[:10]:
+            lines.append(
+                f"  {row['ticker']:<8} {row['composite_score']:>10.4f} "
+                f"{row['adjusted_alpha']:>12.4f} {row['momentum_rank']:>10.4f}"
             )
-            conn.commit()
-            logger.info("Seeded %d synthetic price rows", len(mock_rows))
-        conn.close()
 
-    result = run_portfolio_optimization(regime=args.regime)
-    if result:
-        print("\n" + "=" * 70)
-        print("PORTFOLIO ALLOCATION -- %s REGIME" % result.get("regime", "?").upper())
-        print("=" * 70)
+    lines.append("\n" + "=" * 72)
+    return "\n".join(lines)
 
-        positions = result.get("positions", {})
-        print(f"\n{'Ticker':<8} {'Weight':>7} {'Total $':>10} {'Taxable $':>10} {'Roth $':>10} {'Account':<10} Reason")
-        print("-" * 90)
 
-        total_t = 0
-        total_r = 0
-        for ticker, info in sorted(positions.items(), key=lambda x: x[1]["total_dollars"], reverse=True):
-            print(
-                f"{ticker:<8} {info['pct']:>6.1f}% ${info['total_dollars']:>9,.0f} "
-                f"${info['taxable_dollars']:>9,.0f} ${info['roth_dollars']:>9,.0f} "
-                f"{info['account']:<10} {info['reason']}"
-            )
-            total_t += info["taxable_dollars"]
-            total_r += info["roth_dollars"]
+def print_account_summary(
+    result: dict,
+    taxable_value: float,
+    roth_value: float,
+) -> None:
+    """Print a concise account summary table."""
+    acct = result.get("account_allocation", {})
+    total_value = taxable_value + roth_value
 
-        print("-" * 90)
-        print(f"{'TOTAL':<8} {'100.0':>6}% ${total_t + total_r:>9,.0f} ${total_t:>9,.0f} ${total_r:>9,.0f}")
+    print(f"\nAccount Summary (Total: ${total_value:,.0f})")
+    print(f"{'Account':<12} {'Allocated':>12} {'% of Total':>12}")
+    print("-" * 40)
+
+    total_t = sum(acct.get("taxable", {}).values())
+    total_r = sum(acct.get("roth", {}).values())
+
+    print(f"{'Taxable':<12} ${total_t:>11,.0f} {total_t/total_value:>11.1%}")
+    print(f"{'Roth IRA':<12} ${total_r:>11,.0f} {total_r/total_value:>11.1%}")
+    print("-" * 40)
+    print(f"{'TOTAL':<12} ${total_t + total_r:>9,.0f} ${total_t:>9,.0f} ${total_r:>9,.0f}")
