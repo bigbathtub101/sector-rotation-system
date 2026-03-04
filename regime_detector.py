@@ -140,6 +140,26 @@ def compute_wedge_volume_percentile(
     Normalize the raw wedge volume to a percentile rank using its own
     trailing distribution.
 
+    LOOKAHEAD BIAS NOTE
+    -------------------
+    This function uses a CAUSAL rolling window: for each date t, the
+    percentile is computed over [t-lookback, t] inclusive.  The current
+    observation IS included in the window (line ``i - lookback : i + 1``),
+    which means the percentile is "where does today sit relative to the
+    past lookback days, including today?"
+
+    This is intentional and NOT lookahead bias because:
+      - We never look at future observations (i+1, i+2, ...) when scoring
+        date i.
+      - Including the current observation in its own rank is standard
+        practice (equivalent to scipy.stats.percentileofscore(kind='weak')).
+      - The lookback window is strictly backward-looking from the
+        evaluation date.
+
+    If you modify this function, ensure no data from dates > i enters
+    the window.  See also ``src/sector_rotation/lookahead_guard.py`` for
+    automated walk-forward validation.
+
     Parameters
     ----------
     wedge_volume : pd.Series
@@ -563,6 +583,42 @@ def compute_daily_regime(
     # -- Trim to start_date if provided --
     if start_date:
         regime_df = regime_df[regime_df["date"] >= start_date].reset_index(drop=True)
+
+    # -- Runtime lookahead validation (development / CI only) ----------------
+    # Checks that no future data leaked into the percentile computation.
+    # Disabled by default in production (set REGIME_VALIDATE_LOOKAHEAD=1 to enable).
+    import os
+    if os.environ.get("REGIME_VALIDATE_LOOKAHEAD", "") == "1":
+        try:
+            from src.sector_rotation.lookahead_guard import validate_no_lookahead
+            # Re-run percentile computation on the first 80% of data, then
+            # check that adding the remaining 20% does not change the earlier
+            # percentiles (a hallmark of lookahead contamination).
+            split_idx = int(len(wedge_vol.dropna()) * 0.8)
+            early_pct = compute_wedge_volume_percentile(
+                wedge_vol.iloc[:split_idx], lookback=pct_lookback
+            )
+            full_pct = compute_wedge_volume_percentile(
+                wedge_vol, lookback=pct_lookback
+            )
+            # Compare the overlapping portion — they must be identical
+            overlap = early_pct.iloc[:split_idx].dropna()
+            full_overlap = full_pct.iloc[:split_idx].dropna()
+            common_idx = overlap.index.intersection(full_overlap.index)
+            if len(common_idx) > 0:
+                max_diff = (overlap.loc[common_idx] - full_overlap.loc[common_idx]).abs().max()
+                if max_diff > 1e-10:
+                    logger.error(
+                        "LOOKAHEAD VIOLATION: percentile changed by %.6f when "
+                        "future data was added. Check compute_wedge_volume_percentile.",
+                        max_diff,
+                    )
+                else:
+                    logger.info("Lookahead validation PASSED (max_diff=%.2e)", max_diff)
+        except ImportError:
+            logger.debug("lookahead_guard not available — skipping validation")
+        except Exception as e:
+            logger.warning("Lookahead validation error: %s", e)
 
     logger.info("Regime computation complete: %d days", len(regime_df))
     return regime_df
