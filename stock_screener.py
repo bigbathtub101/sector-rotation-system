@@ -1072,7 +1072,10 @@ def run_stock_screener(
     # --- Step 1: Determine regime ---
     if regime is None:
         try:
-            from regime_detector import get_latest_regime_state
+            try:
+                from regime_detector import get_latest_regime_state
+            except ImportError:
+                from sector_rotation.regime_detector import get_latest_regime_state
             state = get_latest_regime_state(conn, cfg)
             regime = state.get("dominant_regime", "offense")
         except Exception:
