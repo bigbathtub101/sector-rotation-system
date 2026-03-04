@@ -67,40 +67,55 @@ _holdings_tracker = None
 
 try:
     import data_feeds as _data_feeds
-except ImportError as _e:
-    logging.getLogger("monitor").error(
-        "IMPORT FAILED: data_feeds — %s. "
-        "Step 1 (data refresh) will be skipped. "
-        "Ensure data_feeds.py is in the same directory as monitor.py.", _e)
+except ImportError:
+    try:
+        from sector_rotation import data_feeds as _data_feeds
+    except ImportError as _e:
+        logging.getLogger("monitor").error(
+            "IMPORT FAILED: data_feeds — %s. "
+            "Step 1 (data refresh) will be skipped. "
+            "Ensure data_feeds.py is in the same directory as monitor.py.", _e)
 
 try:
     import regime_detector as _regime_detector
-except ImportError as _e:
-    logging.getLogger("monitor").error(
-        "IMPORT FAILED: regime_detector — %s. "
-        "Steps 2-3 (regime detection) will fall back to last known regime. "
-        "Ensure regime_detector.py is in the same directory.", _e)
+except ImportError:
+    try:
+        from sector_rotation import regime_detector as _regime_detector
+    except ImportError as _e:
+        logging.getLogger("monitor").error(
+            "IMPORT FAILED: regime_detector — %s. "
+            "Steps 2-3 (regime detection) will fall back to last known regime. "
+            "Ensure regime_detector.py is in the same directory.", _e)
 
 try:
     import portfolio_optimizer as _portfolio_optimizer
-except ImportError as _e:
-    logging.getLogger("monitor").error(
-        "IMPORT FAILED: portfolio_optimizer — %s. "
-        "Step 4 (optimization) will use last allocation. "
-        "Ensure portfolio_optimizer.py is in the same directory.", _e)
+except ImportError:
+    try:
+        from sector_rotation import portfolio_optimizer as _portfolio_optimizer
+    except ImportError as _e:
+        logging.getLogger("monitor").error(
+            "IMPORT FAILED: portfolio_optimizer — %s. "
+            "Step 4 (optimization) will use last allocation. "
+            "Ensure portfolio_optimizer.py is in the same directory.", _e)
 
 try:
     import nlp_sentiment as _nlp_sentiment
-except ImportError as _e:
-    # NLP is optional — only log at INFO level
-    logging.getLogger("monitor").info(
-        "nlp_sentiment not available — NLP scoring will be skipped (%s)", _e)
+except ImportError:
+    try:
+        from sector_rotation import nlp_sentiment as _nlp_sentiment
+    except ImportError as _e:
+        # NLP is optional — only log at INFO level
+        logging.getLogger("monitor").info(
+            "nlp_sentiment not available — NLP scoring will be skipped (%s)", _e)
 
 try:
     import holdings_tracker as _holdings_tracker
-except ImportError as _e:
-    logging.getLogger("monitor").info(
-        "holdings_tracker not available — holdings drift will not be checked (%s)", _e)
+except ImportError:
+    try:
+        from sector_rotation import holdings_tracker as _holdings_tracker
+    except ImportError as _e:
+        logging.getLogger("monitor").info(
+            "holdings_tracker not available — holdings drift will not be checked (%s)", _e)
 
 # ---------------------------------------------------------------------------
 # LOGGING
