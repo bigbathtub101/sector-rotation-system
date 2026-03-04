@@ -1,32 +1,12 @@
 # ============================================================================
 # Sector Rotation System — Daily Monitor
 # ============================================================================
-# Runs monitor.py every trading day at 4:30 PM ET (21:30 UTC during EDT,
-# 20:30 UTC during EST).  Using 21:30 UTC which covers EDT; during EST
-# the run happens at 4:30 PM ET either way (close enough).
-#
-# On any alert: sends email via Gmail SMTP, Telegram message, and
-# writes daily allocation row to Google Sheets.
-# Full daily report stored as a GitHub Actions artifact (90-day retention).
-#
-# Required GitHub Actions Secrets:
-#   FRED_API_KEY                - FRED API key (free at fred.stlouisfed.org)
-#   GMAIL_USERNAME              - Gmail address (e.g. you@gmail.com)
-#   GMAIL_PASSWORD              - Gmail App Password (NOT your Google password)
-#   TELEGRAM_BOT_TOKEN          - Telegram bot token from @BotFather
-#   TELEGRAM_CHAT_ID            - Your Telegram chat ID
-#   GOOGLE_SHEETS_CREDENTIALS   - Service account JSON (single-line)
-# ============================================================================
-
 name: Daily Sector Rotation Monitor
 
 on:
   schedule:
-    # 4:30 PM ET ≈ 21:30 UTC (EDT) / 20:30 UTC (EST)
-    # Using 21:30 UTC to cover EDT; during EST it fires at 3:30 PM ET
-    # which is still after market close (acceptable).
     - cron: "30 21 * * 1-5"
-  workflow_dispatch:          # Allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,7 +14,7 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15       # Hard cap; typical run is 2–4 minutes
+    timeout-minutes: 15
 
     steps:
       # ------------------------------------------------------------------
@@ -53,7 +33,7 @@ jobs:
           cache: "pip"
 
       # ------------------------------------------------------------------
-      # 3. Install CI dependencies (lightweight — no torch/streamlit)
+      # 3. Install CI dependencies
       # ------------------------------------------------------------------
       - name: Install dependencies
         run: |
@@ -67,12 +47,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: rotation_system.db
-          key: rotation-db-${{ github.run_id }}
+          key: rotation-db-latest
           restore-keys: |
             rotation-db-
 
       # ------------------------------------------------------------------
-      # 5. Skip on US market holidays (basic check)
+      # 5. Skip on US market holidays
       # ------------------------------------------------------------------
       - name: Check if market is open
         id: market_check
@@ -81,9 +61,9 @@ jobs:
           import datetime as dt
           today = dt.date.today()
           FIXED_HOLIDAYS = {
-              (1, 1),   # New Year's Day
-              (7, 4),   # Independence Day
-              (12, 25), # Christmas
+              (1, 1),
+              (7, 4),
+              (12, 25),
           }
           month, day, weekday = today.month, today.day, today.weekday()
           is_holiday = False
@@ -100,13 +80,11 @@ jobs:
           elif month == 11 and weekday == 3 and 22 <= day <= 28:
               is_holiday = True  # Thanksgiving
           if is_holiday:
-              print('skip=true')
-          else:
-              print('skip=false')
-          " >> $GITHUB_OUTPUT
+              exit(1)
+          " && echo "skip=false" >> $GITHUB_OUTPUT || echo "skip=true" >> $GITHUB_OUTPUT
 
       # ------------------------------------------------------------------
-      # 6. Run the daily monitor (--run-daily = live data + delivery)
+      # 6. Run the daily monitor
       # ------------------------------------------------------------------
       - name: Run monitor.py
         if: steps.market_check.outputs.skip != 'true'
@@ -119,10 +97,9 @@ jobs:
           GOOGLE_SHEETS_CREDENTIALS: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS }}
         run: |
           python monitor.py --run-daily 2>&1 | tee daily_report.txt
-          echo "MONITOR_EXIT_CODE=${PIPESTATUS[0]}" >> $GITHUB_ENV
 
       # ------------------------------------------------------------------
-      # 7. Upload daily report as artifact (90-day retention, free)
+      # 7. Upload daily report as artifact (90-day retention)
       # ------------------------------------------------------------------
       - name: Upload daily report
         if: steps.market_check.outputs.skip != 'true' && always()
@@ -133,13 +110,22 @@ jobs:
             daily_report.txt
             alerts.json
             alerts_history.csv
-            rotation_system.db
           retention-days: 90
 
       # ------------------------------------------------------------------
-      # 8. Send failure notification via Telegram on error
+      # 8. Save updated DB back to cache
       # ------------------------------------------------------------------
-      - name: Notify on failure
+      - name: Save database cache
+        if: steps.market_check.outputs.skip != 'true' && always()
+        uses: actions/cache/save@v4
+        with:
+          path: rotation_system.db
+          key: rotation-db-latest
+
+      # ------------------------------------------------------------------
+      # 9. Notify on failure via Telegram
+      # ------------------------------------------------------------------
+      - name: Notify on failure via Telegram
         if: failure() && steps.market_check.outputs.skip != 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -157,9 +143,9 @@ jobs:
           "
 
       # ------------------------------------------------------------------
-      # 9. Send failure notification via email on error
+      # 10. Notify on failure via email
       # ------------------------------------------------------------------
-      - name: Email on failure
+      - name: Notify on failure via email
         if: failure() && steps.market_check.outputs.skip != 'true'
         env:
           GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
