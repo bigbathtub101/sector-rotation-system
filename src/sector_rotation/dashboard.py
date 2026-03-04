@@ -1,1 +1,1570 @@
-"""\ndashboard.py — Phase 6: Streamlit Dashboard\n==============================================\nGlobal Sector Rotation System\n\nA visual interface you can check anytime — from desktop or phone.\nDeployable to Streamlit Community Cloud (free).\n\nPages:\n  1. Regime Dashboard   — gauge, probability bars, Fast Shock, timeline\n  2. Portfolio Allocation — dual-account table, historical toggle\n  3. Signal Detail       — wedge volume history, factor trends, NLP, macro\n  4. Stock Screener      — top candidates, watchlists, 8-K filings\n  5. Alerts Log          — historical alerts, regime transitions\n  6. Backtester          — standard + 3 failure-mode stress tests\n\nRun locally:\n  streamlit run dashboard.py\n\nDependencies: streamlit, plotly, pandas, numpy, pyyaml\n"""\n\nimport datetime as dt\nimport json\nimport math\nimport sqlite3\nimport sys\nfrom pathlib import Path\nfrom typing import Any, Dict, List, Optional, Tuple\n\nimport numpy as np\nimport pandas as pd\nimport plotly.express as px\nimport plotly.graph_objects as go\nimport streamlit as st\nimport yaml\n\n# ---------------------------------------------------------------------------\n# PATHS  (relative to this file)\n# ---------------------------------------------------------------------------\nBASE_DIR = Path(__file__).parent\nCONFIG_PATH = BASE_DIR / "config.yaml"\nDB_PATH = BASE_DIR / "rotation_system.db"\n\n# ---------------------------------------------------------------------------\n# CONFIG\n# ---------------------------------------------------------------------------\n@st.cache_data(ttl=300)\ndef load_config() -> dict:\n    with open(CONFIG_PATH, "r") as f:\n        return yaml.safe_load(f)\n\n# ---------------------------------------------------------------------------\n# DATABASE HELPERS\n# ---------------------------------------------------------------------------\ndef get_db() -> sqlite3.Connection:\n    return sqlite3.connect(str(DB_PATH), check_same_thread=False)\n\n@st.cache_data(ttl=60)\ndef query_df(sql: str, params: tuple = ()) -> pd.DataFrame:\n    conn = get_db()\n    try:\n        return pd.read_sql_query(sql, conn, params=params)\n    except Exception:\n        return pd.DataFrame()\n    finally:\n        conn.close()\n\ndef query_one(sql: str, params: tuple = ()) -> Optional[tuple]:\n    conn = get_db()\n    try:\n        return conn.execute(sql, params).fetchone()\n    except Exception:\n        return None\n    finally:\n        conn.close()\n\n\n# ---------------------------------------------------------------------------\n# DATA LOADERS\n# ---------------------------------------------------------------------------\n@st.cache_data(ttl=60)\ndef load_latest_regime() -> Dict:\n    row = query_one(\n        "SELECT date, signal_data FROM signals "\n        "WHERE signal_type = 'regime_state' "\n        "ORDER BY date DESC LIMIT 1"\n    )\n    if row:\n        data = json.loads(row[1])\n        data["date"] = row[0]\n        return data\n    return {\n        "date": None, "dominant_regime": "offense",\n        "wedge_volume_percentile": 50.0,\n        "regime_probabilities": {"panic": 0.0, "defense": 0.0, "offense": 1.0},\n        "fast_shock_risk": "low", "vix_rv_ratio": 0.0,\n        "consecutive_days_in_regime": 0, "regime_confirmed": False,\n    }\n\n\n@st.cache_data(ttl=60)\ndef load_regime_history(days: int = 730) -> pd.DataFrame:\n    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()\n    df = query_df(\n        "SELECT date, signal_data FROM signals "\n        "WHERE signal_type = 'regime_state' AND date >= ? "\n        "ORDER BY date ASC",\n        (cutoff,),\n    )\n    if df.empty:\n        return pd.DataFrame()\n    records = []\n    for _, row in df.iterrows():\n        d = json.loads(row["signal_data"])\n        d["date"] = row["date"]\n        records.append(d)\n    return pd.DataFrame(records)\n\n\n@st.cache_data(ttl=60)\ndef load_latest_allocation() -> Optional[Dict]:\n    row = query_one(\n        "SELECT date, regime, allocation_json, dollar_taxable, dollar_roth "\n        "FROM allocations ORDER BY date DESC LIMIT 1"\n    )\n    if row:\n        return {\n            "date": row[0], "regime": row[1],\n            "allocations": json.loads(row[2]) if row[2] else {},\n            "taxable_dollars": json.loads(row[3]) if row[3] else {},\n            "roth_dollars": json.loads(row[4]) if row[4] else {},\n        }\n    return None\n\n\n@st.cache_data(ttl=60)\ndef load_all_allocations() -> pd.DataFrame:\n    return query_df(\n        "SELECT date, regime, allocation_json AS allocations, "\n        "dollar_taxable AS taxable_dollars, dollar_roth AS roth_dollars "\n        "FROM allocations ORDER BY date DESC"\n    )\n\n\n@st.cache_data(ttl=60)\ndef load_factor_history(days: int = 730) -> pd.DataFrame:\n    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()\n    df = query_df(\n        "SELECT date, signal_data FROM signals "\n        "WHERE signal_type = 'factor_scores' AND date >= ? "\n        "ORDER BY date ASC",\n        (cutoff,),\n    )\n    if df.empty:\n        return pd.DataFrame()\n    records = []\n    for _, row in df.iterrows():\n        d = json.loads(row["signal_data"])\n        for s in d.get("sector_scores", []):\n            s["date"] = row["date"]\n            records.append(s)\n    return pd.DataFrame(records)\n\n\n@st.cache_data(ttl=60)\ndef load_nlp_sector_signals() -> pd.DataFrame:\n    return query_df(\n        "SELECT * FROM nlp_sector_signals ORDER BY date DESC LIMIT 50"\n    )\n\n\n@st.cache_data(ttl=60)\ndef load_macro_data() -> pd.DataFrame:\n    return query_df("SELECT * FROM macro_data ORDER BY date DESC")\n\n\n@st.cache_data(ttl=60)\ndef load_prices(tickers: List[str] = None, days: int = 730) -> pd.DataFrame:\n    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()\n    if tickers:\n        placeholders = ",".join("?" * len(tickers))\n        return query_df(\n            f"SELECT date, ticker, close FROM prices "\n            f"WHERE date >= ? AND ticker IN ({placeholders}) "\n            f"ORDER BY date ASC",\n            (cutoff, *tickers),\n        )\n    return query_df(\n        "SELECT date, ticker, close FROM prices WHERE date >= ? ORDER BY date ASC",\n        (cutoff,),\n    )\n\n\n@st.cache_data(ttl=60)\ndef load_alerts_history() -> pd.DataFrame:\n    return query_df(\n        "SELECT * FROM monitor_runs ORDER BY date DESC LIMIT 200"\n    )\n\n\n@st.cache_data(ttl=60)\ndef load_filings() -> pd.DataFrame:\n    return query_df("SELECT * FROM filings ORDER BY date DESC LIMIT 50")\n\n\n@st.cache_data(ttl=60)\ndef load_nlp_scores() -> pd.DataFrame:\n    return query_df("SELECT * FROM nlp_scores ORDER BY date DESC LIMIT 50")\n\n\n# ===========================================================================\n# PAGE SETUP\n# ===========================================================================\nst.set_page_config(\n    page_title="Sector Rotation System",\n    page_icon="\ud83d\udcca",\n    layout="wide",\n    initial_sidebar_state="expanded",\n)\n\n# --- Custom CSS ---\nst.markdown("""\n<style>\n    /* Hide default Streamlit branding */\n    #MainMenu {visibility: hidden;}\n    footer {visibility: hidden;}\n\n    /* Metric cards */\n    .metric-card {\n        background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);\n        border-radius: 12px;\n        padding: 20px;\n        text-align: center;\n        border: 1px solid rgba(255,255,255,0.08);\n    }\n    .metric-value {\n        font-size: 2.2rem;\n        font-weight: 700;\n        margin: 4px 0;\n    }\n    .metric-label {\n        font-size: 0.85rem;\n        color: #8888aa;\n        text-transform: uppercase;\n        letter-spacing: 1px;\n    }\n\n    /* Regime colors */\n    .regime-offense { color: #00d26a; }\n    .regime-defense { color: #ffc107; }\n    .regime-panic   { color: #ff4444; }\n\n    /* Severity badges */\n    .badge-critical {\n        background: #ff4444; color: white; padding: 2px 10px;\n        border-radius: 4px; font-weight: 600; font-size: 0.8rem;\n    }\n    .badge-high {\n        background: #ffc107; color: #1e1e2e; padding: 2px 10px;\n        border-radius: 4px; font-weight: 600; font-size: 0.8rem;\n    }\n    .badge-medium {\n        background: #17a2b8; color: white; padding: 2px 10px;\n        border-radius: 4px; font-weight: 600; font-size: 0.8rem;\n    }\n    .badge-low {\n        background: #6c757d; color: white; padding: 2px 10px;\n        border-radius: 4px; font-weight: 600; font-size: 0.8rem;\n    }\n\n    /* Table styling */\n    .allocation-table th {\n        background: #2d2d44;\n        color: #8888aa;\n        text-transform: uppercase;\n        font-size: 0.75rem;\n        letter-spacing: 1px;\n    }\n</style>\n""", unsafe_allow_html=True)\n\n\n# ===========================================================================\n# SIDEBAR NAVIGATION\n# ===========================================================================\ncfg = load_config()\n\nPAGES = [\n    "\ud83d\udcc8 Regime Dashboard",\n    "\ud83d\udcbc Portfolio Allocation",\n    "\ud83c\udfe6 My Holdings",\n    "\ud83d\udd0d Signal Detail",\n    "\ud83c\udfaf Stock Screener",\n    "\ud83d\udd14 Alerts Log",\n    "\ud83d\udcca Backtester",\n]\n\nst.sidebar.title("Sector Rotation System")\nst.sidebar.markdown("---")\npage = st.sidebar.radio("Navigation", PAGES, label_visibility="collapsed")\n\n# Show current regime in sidebar\nregime_state = load_latest_regime()\nregime = regime_state.get("dominant_regime", "offense").upper()\nregime_color = {"OFFENSE": "#00d26a", "DEFENSE": "#ffc107", "PANIC": "#ff4444"}.get(regime, "#888")\nst.sidebar.markdown(f"""\n<div style=\"text-align:center; padding:12px; margin-top:8px;\n     background:rgba(255,255,255,0.03); border-radius:8px;\n     border:1px solid {regime_color}40;\">\n    <div style=\"font-size:0.7rem; color:#888; text-transform:uppercase;\n         letter-spacing:2px;\">Current Regime</div>\n    <div style=\"font-size:1.6rem; font-weight:700; color:{regime_color};\n         margin:4px 0;\">{regime}</div>\n    <div style=\"font-size:0.75rem; color:#aaa;\">\n        Day {regime_state.get('consecutive_days_in_regime', 0)} \u00b7\n        {'Confirmed' if regime_state.get('regime_confirmed') else 'Unconfirmed'}\n    </div>\n</div>\n""", unsafe_allow_html=True)\n\nst.sidebar.markdown(f"""\n<div style=\"text-align:center; padding:8px; margin-top:6px; font-size:0.7rem; color:#666;\">\n    Data as of {regime_state.get('date', 'N/A')}\n</div>\n""", unsafe_allow_html=True)\n\n\n# ===========================================================================\n# PAGE 1: REGIME DASHBOARD\n# ===========================================================================\ndef page_regime_dashboard():\n    st.title("Regime Dashboard")\n    st.caption("Live system state — wedge volume, regime probabilities, and Fast Shock Risk")\n\n    # --- Top metrics row ---\n    col1, col2, col3, col4 = st.columns(4)\n\n    wv_pct = regime_state.get("wedge_volume_percentile", 0)\n    vix_rv = regime_state.get("vix_rv_ratio", 0)\n    fast_shock = regime_state.get("fast_shock_risk", "low").upper()\n    consec = regime_state.get("consecutive_days_in_regime", 0)\n    confirmed = "YES" if regime_state.get("regime_confirmed") else "NO"\n\n    with col1:\n        st.metric("Wedge Volume Percentile", f"{wv_pct:.1f}%")\n    with col2:\n        st.metric("VIX / RV Ratio", f"{vix_rv:.2f}")\n    with col3:\n        shock_color = "\ud83d\udd34" if fast_shock == "HIGH" else "\ud83d\udfe2"\n        st.metric("Fast Shock Risk", f"{shock_color} {fast_shock}")\n    with col4:\n        st.metric("Regime Day", f"{consec} (Confirmed: {confirmed})")\n\n    st.markdown("---")\n\n    # --- Wedge Volume Gauge ---\n    col_gauge, col_probs = st.columns([1, 1])\n\n    with col_gauge:\n        st.subheader("Wedge Volume Gauge")\n        thresholds = cfg.get("regime", {}).get("thresholds", {})\n        panic_upper = thresholds.get("panic_upper", 5)\n        defense_upper = thresholds.get("defense_upper", 30)\n\n        fig_gauge = go.Figure(go.Indicator(\n            mode="gauge+number",\n            value=wv_pct,\n            number={"suffix": "%", "font": {"size": 42}},\n            gauge={\n                "axis": {"range": [0, 100], "tickwidth": 1},\n                "bar": {"color": regime_color, "thickness": 0.3},\n                "steps": [\n                    {"range": [0, panic_upper], "color": "rgba(255,68,68,0.3)"},\n                    {"range": [panic_upper, defense_upper], "color": "rgba(255,193,7,0.3)"},\n                    {"range": [defense_upper, 100], "color": "rgba(0,210,106,0.3)"},\n                ],\n                "threshold": {\n                    "line": {"color": "white", "width": 3},\n                    "thickness": 0.8,\n                    "value": wv_pct,\n                },\n            },\n            title={"text": "Wedge Volume Percentile", "font": {"size": 14}},\n        ))\n        fig_gauge.update_layout(\n            height=280, margin=dict(t=40, b=20, l=30, r=30),\n            paper_bgcolor="rgba(0,0,0,0)",\n            font={"color": "#ccc"},\n        )\n        st.plotly_chart(fig_gauge, use_container_width=True)\n\n    with col_probs:\n        st.subheader("Regime Probabilities")\n        probs = regime_state.get("regime_probabilities", {})\n        prob_data = pd.DataFrame({\n            "Regime": ["Offense", "Defense", "Panic"],\n            "Probability": [\n                probs.get("offense", 0) * 100,\n                probs.get("defense", 0) * 100,\n                probs.get("panic", 0) * 100,\n            ],\n        })\n        fig_probs = px.bar(\n            prob_data, x="Probability", y="Regime",\n            orientation="h",\n            color="Regime",\n            color_discrete_map={\n                "Offense": "#00d26a", "Defense": "#ffc107", "Panic": "#ff4444"\n            },\n            text="Probability",\n        )\n        fig_probs.update_traces(texttemplate="%{text:.1f}%", textposition="outside")\n        fig_probs.update_layout(\n            height=280, showlegend=False,\n            xaxis={"range": [0, 105], "title": "Probability (%)", "showgrid": True},\n            yaxis={"title": ""},\n            margin=dict(t=40, b=20, l=10, r=40),\n            paper_bgcolor="rgba(0,0,0,0)",\n            plot_bgcolor="rgba(0,0,0,0)",\n            font={"color": "#ccc"},\n        )\n        st.plotly_chart(fig_probs, use_container_width=True)\n\n    # --- Historical Regime Timeline ---\n    st.subheader("Historical Regime Timeline")\n    hist = load_regime_history()\n    if not hist.empty:\n        regime_map = {"offense": 3, "defense": 2, "panic": 1}\n        color_map = {"offense": "#00d26a", "defense": "#ffc107", "panic": "#ff4444"}\n\n        hist["regime_num"] = hist["dominant_regime"].map(regime_map)\n        hist["color"] = hist["dominant_regime"].map(color_map)\n\n        fig_timeline = go.Figure()\n\n        # Regime band shading\n        for regime_name, num in regime_map.items():\n            mask = hist["dominant_regime"] == regime_name\n            if mask.any():\n                fig_timeline.add_trace(go.Scatter(\n                    x=hist.loc[mask, "date"],\n                    y=hist.loc[mask, "regime_num"],\n                    mode="markers",\n                    marker={"color": color_map[regime_name], "size": 6},\n                    name=regime_name.capitalize(),\n                    hovertemplate="%{x}<br>Regime: " + regime_name.capitalize() + "<extra></extra>",\n                ))\n\n        fig_timeline.update_layout(\n            height=250,\n            yaxis={\n                "tickvals": [1, 2, 3],\n                "ticktext": ["Panic", "Defense", "Offense"],\n                "title": "",\n            },\n            xaxis={"title": "Date"},\n            margin=dict(t=20, b=40, l=60, r=20),\n            paper_bgcolor="rgba(0,0,0,0)",\n            plot_bgcolor="rgba(0,0,0,0)",\n            font={"color": "#ccc"},\n            showlegend=True,\n            legend={"orientation": "h", "y": 1.12},\n        )\n        st.plotly_chart(fig_timeline, use_container_width=True)\n\n        # Wedge volume history overlay\n        if "wedge_volume_percentile" in hist.columns:\n            st.subheader("Wedge Volume Percentile History")\n            fig_wv = go.Figure()\n            fig_wv.add_trace(go.Scatter(\n                x=hist["date"], y=hist["wedge_volume_percentile"],\n                mode="lines", name="Wedge Volume %",\n                line={"color": "#6c63ff", "width": 2},\n            ))\n            # Add threshold lines\n            fig_wv.add_hline(y=panic_upper, line_dash="dash",\n                            line_color="#ff4444", annotation_text="Panic threshold")\n            fig_wv.add_hline(y=defense_upper, line_dash="dash",\n                            line_color="#ffc107", annotation_text="Defense threshold")\n            fig_wv.update_layout(\n                height=280,\n                yaxis={"title": "Percentile", "range": [0, 100]},\n                xaxis={"title": "Date"},\n                margin=dict(t=20, b=40, l=60, r=20),\n                paper_bgcolor="rgba(0,0,0,0)",\n                plot_bgcolor="rgba(0,0,0,0)",\n                font={"color": "#ccc"},\n            )\n            st.plotly_chart(fig_wv, use_container_width=True)\n    else:\n        st.info("No regime history data available. Run `monitor.py --mock` to populate.")\n\n\n# ===========================================================================\n# PAGE 2: PORTFOLIO ALLOCATION\n# ===========================================================================\ndef page_portfolio_allocation():\n    st.title("Portfolio Allocation")\n\n    alloc = load_latest_allocation()\n    total_val = cfg.get("portfolio", {}).get("total_value", 144000)\n    taxable_val = cfg.get("portfolio", {}).get("accounts", {}).get("taxable", {}).get("value", 100000)\n    roth_val = cfg.get("portfolio", {}).get("accounts", {}).get("roth_ira", {}).get("value", 44000)\n\n    if alloc:\n        st.caption(f"As of: {alloc['date']} \u00b7 Regime: {alloc['regime'].upper()}")\n\n        # --- Top metrics ---\n        m1, m2, m3 = st.columns(3)\n        m1.metric("Total Portfolio", f"${total_val:,.0f}")\n        m2.metric("Taxable Account", f"${taxable_val:,.0f}")\n        m3.metric("Roth IRA", f"${roth_val:,.0f}")\n\n        st.markdown("---")\n\n        # --- Allocation table ---\n        DISPLAY_NAMES = {\n            "us_equities": "US Equities (ETFs)",\n            "intl_developed": "Intl Developed",\n            "em_equities": "EM Equities",\n            "energy_materials": "Energy / Materials",\n            "healthcare": "Healthcare (ETF)",\n            "cash_short_duration": "Cash / BIL",\n            "vix_overlay_notional": "VIX Overlay (notional)",\n        }\n\n        weights = alloc.get("allocations", {})\n        tax_d = alloc.get("taxable_dollars", {})\n        roth_d = alloc.get("roth_dollars", {})\n\n        rows = []\n        for key, display in DISPLAY_NAMES.items():\n            pct = weights.get(key, 0) or 0\n            target_dollar = round(pct * total_val, 2)\n            taxable = tax_d.get(key, 0) or 0\n            roth = roth_d.get(key, 0) or 0\n            rows.append({\n                "Category": display,\n                "Target %": f"{pct:.1%}",\n                "Target $": f"${target_dollar:,.0f}",\n                "Taxable $": f"${taxable:,.0f}" if taxable > 0 else "\u2014",\n                "Roth IRA $": f"${roth:,.0f}" if roth > 0 else "\u2014",\n            })\n\n        # Total row\n        total_pct = sum(weights.get(k, 0) or 0 for k in DISPLAY_NAMES)\n        total_tax = sum(tax_d.get(k, 0) or 0 for k in DISPLAY_NAMES)\n        total_roth = sum(roth_d.get(k, 0) or 0 for k in DISPLAY_NAMES)\n        rows.append({\n            "Category": "TOTAL",\n            "Target %": f"{total_pct:.1%}",\n            "Target $": f"${total_val:,.0f}",\n            "Taxable $": f"${total_tax:,.0f}",\n            "Roth IRA $": f"${total_roth:,.0f}",\n        })\n\n        df_alloc = pd.DataFrame(rows)\n        st.dataframe(\n            df_alloc,\n            use_container_width=True,\n            hide_index=True,\n            column_config={\n                "Category": st.column_config.TextColumn(width="large"),\n            },\n        )\n\n        # --- Pie chart ---\n        st.subheader("Allocation Breakdown")\n        pie_data = []\n        for key, display in DISPLAY_NAMES.items():\n            pct = weights.get(key, 0) or 0\n            if pct > 0:\n                pie_data.append({"Category": display, "Weight": pct})\n        if pie_data:\n            pie_df = pd.DataFrame(pie_data)\n            fig_pie = px.pie(\n                pie_df, names="Category", values="Weight",\n                color="Category",\n                color_discrete_sequence=px.colors.qualitative.Set2,\n                hole=0.4,\n            )\n            fig_pie.update_traces(textposition="outside", textinfo="label+percent")\n            fig_pie.update_layout(\n                height=400,\n                margin=dict(t=20, b=20),\n                paper_bgcolor="rgba(0,0,0,0)",\n                font={"color": "#ccc"},\n                showlegend=False,\n            )\n            st.plotly_chart(fig_pie, use_container_width=True)\n\n        # --- Historical allocations toggle ---\n        st.markdown("---")\n        with st.expander("\ud83d\udcc5 View Historical Allocations"):\n            all_allocs = load_all_allocations()\n            if not all_allocs.empty:\n                selected_date = st.selectbox(\n                    "Select date:",\n                    all_allocs["date"].tolist(),\n                )\n                sel_row = all_allocs[all_allocs["date"] == selected_date].iloc[0]\n                hist_weights = json.loads(sel_row["allocations"]) if sel_row["allocations"] else {}\n                hist_tax = json.loads(sel_row["taxable_dollars"]) if sel_row["taxable_dollars"] else {}\n                hist_roth = json.loads(sel_row["roth_dollars"]) if sel_row["roth_dollars"] else {}\n\n                hist_rows = []\n                for key, display in DISPLAY_NAMES.items():\n                    pct = hist_weights.get(key, 0) or 0\n                    hist_rows.append({\n                        "Category": display,\n                        "Target %": f"{pct:.1%}",\n                        "Target $": f"${pct * total_val:,.0f}",\n                        "Taxable $": f"${hist_tax.get(key, 0):,.0f}" if hist_tax.get(key, 0) else "\u2014",\n                        "Roth IRA $": f"${hist_roth.get(key, 0):,.0f}" if hist_roth.get(key, 0) else "\u2014",\n                    })\n                st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)\n            else:\n                st.info("No historical allocation data.")\n    else:\n        st.info("No allocation data available. Run `monitor.py --mock` to populate.")\n\n\n# ===========================================================================\n# PAGE 2B: MY HOLDINGS (actual vs target)\n# ===========================================================================\n\ndef load_holdings() -> pd.DataFrame:\n    \"\"\"Load current holdings from DB.\"\"\"\n    return query_df(\n        "SELECT ticker, account, shares, avg_cost, cost_basis, current_price, "\n        "market_value, unrealized_pnl, asset_class, weight_pct, updated_at "\n        "FROM holdings WHERE shares > 0 ORDER BY market_value DESC"\n    )\n\n\ndef load_trades(limit: int = 50) -> pd.DataFrame:\n    \"\"\"Load recent trade history.\"\"\"\n    return query_df(\n        "SELECT date, ticker, action, shares, price, total_cost, account, notes "\n        "FROM trades ORDER BY date DESC, trade_id DESC LIMIT ?",\n        (limit,),\n    )\n\n\ndef page_my_holdings():\n    st.title("My Holdings")\n    st.caption("Actual portfolio positions vs system target allocation")\n\n    total_val = cfg.get("portfolio", {}).get("total_value", 144000)\n    taxable_val = cfg.get("portfolio", {}).get("accounts", {}).get("taxable", {}).get("value", 100000)\n    roth_val = cfg.get("portfolio", {}).get("accounts", {}).get("roth_ira", {}).get("value", 44000)\n\n    holdings_df = load_holdings()\n\n    if holdings_df.empty:\n        st.warning(\n            "No holdings recorded yet. Use the holdings tracker CLI to log your trades:\\n\\n"\n            "```bash\\n"\n            "python holdings_tracker.py buy XLK 50 --price 210.00 --account taxable\\n"\n            "```"\n        )\n        return\n\n    # --- Top metrics ---\n    total_invested = holdings_df["market_value"].sum() or 0\n    total_pnl = holdings_df["unrealized_pnl"].sum() or 0\n    total_cost = holdings_df["cost_basis"].sum() if "cost_basis" in holdings_df.columns else 0\n    deployment_pct = total_invested / total_val * 100 if total_val > 0 else 0\n    pnl_pct = total_pnl / total_cost * 100 if total_cost > 0 else 0\n\n    m1, m2, m3, m4 = st.columns(4)\n    m1.metric("Invested", f"${total_invested:,.0f}", f"{deployment_pct:.1f}% deployed")\n    m2.metric("Cash", f"${total_val - total_invested:,.0f}")\n    m3.metric("Unrealized P&L", f"${total_pnl:,.0f}",\n             f"{pnl_pct:+.1f}%" if total_cost > 0 else None,\n             delta_color="normal")\n    m4.metric("Positions", f"{len(holdings_df)}")\n\n    st.markdown("---")\n\n    # --- Holdings table ---\n    st.subheader("Current Positions")\n\n    display_df = holdings_df.copy()\n    for col in ["avg_cost", "current_price"]:\n        if col in display_df.columns:\n            display_df[col] = display_df[col].apply(\n                lambda x: f"${x:,.2f}" if pd.notna(x) else "\u2014"\n            )\n    for col in ["market_value", "unrealized_pnl"]:\n        if col in display_df.columns:\n            display_df[col] = display_df[col].apply(\n                lambda x: f"${x:,.2f}" if pd.notna(x) else "\u2014"\n            )\n    if "weight_pct" in display_df.columns:\n        display_df["weight_pct"] = display_df["weight_pct"].apply(\n            lambda x: f"{x:.1f}%" if pd.notna(x) else "\u2014"\n        )\n    if "shares" in display_df.columns:\n        display_df["shares"] = display_df["shares"].apply(\n            lambda x: f"{x:,.2f}" if pd.notna(x) else "\u2014"\n        )\n\n    display_df = display_df.rename(columns={\n        "ticker": "Ticker", "account": "Account", "shares": "Shares",\n        "avg_cost": "Avg Cost", "current_price": "Price",\n        "market_value": "Market Value", "unrealized_pnl": "P&L",\n        "weight_pct": "Weight", "asset_class": "Asset Class",\n    })\n    display_cols = ["Ticker", "Account", "Shares", "Avg Cost", "Price",\n                    "Market Value", "P&L", "Weight", "Asset Class"]\n    display_cols = [c for c in display_cols if c in display_df.columns]\n\n    st.dataframe(\n        display_df[display_cols],\n        use_container_width=True,\n        hide_index=True,\n    )\n\n    st.markdown("---")\n\n    # --- Drift comparison ---\n    st.subheader("Asset Class Drift (Actual vs Target)")\n\n    alloc = load_latest_allocation()\n    if alloc:\n        target_weights = alloc.get("allocations", {})\n\n        # Aggregate actual holdings by asset class\n        raw_holdings = load_holdings()\n        actual_by_class = {}\n        if not raw_holdings.empty and "asset_class" in raw_holdings.columns:\n            for _, row in raw_holdings.iterrows():\n                cls = row.get("asset_class", "other")\n                mv = row.get("market_value", 0) or 0\n                actual_by_class[cls] = actual_by_class.get(cls, 0) + mv\n\n        DISPLAY_NAMES = {\n            "us_equities": "US Equities",\n            "intl_developed": "Intl Developed",\n            "em_equities": "EM Equities",\n            "energy_materials": "Energy / Materials",\n            "healthcare": "Healthcare",\n            "industry_sub": "Industry Sub-Sectors",\n            "thematic": "Thematic",\n            "cash_short_duration": "Cash / Short Duration",\n        }\n\n        drift_rows = []\n        for key, display in DISPLAY_NAMES.items():\n            target = target_weights.get(key, 0)\n            if isinstance(target, dict):\n                target = target.get("pct", 0) / 100.0\n            target = float(target or 0)\n\n            actual_dollars = actual_by_class.get(key, 0)\n            actual_pct = actual_dollars / total_val if total_val > 0 else 0\n\n            drift_bps = (actual_pct - target) * 10000\n\n            drift_rows.append({\n                "Category": display,\n                "Actual %": f"{actual_pct:.1%}",\n                "Target %": f"{target:.1%}",\n                "Drift (bps)": f"{drift_bps:+.0f}",\n                "Actual $": f"${actual_dollars:,.0f}",\n                "Target $": f"${target * total_val:,.0f}",\n                "Gap $": f"${actual_dollars - target * total_val:+,.0f}",\n                "_drift_abs": abs(drift_bps),\n            })\n\n        drift_df = pd.DataFrame(drift_rows)\n        max_drift = drift_df["_drift_abs"].max() if not drift_df.empty else 0\n\n        col_a, col_b = st.columns([1, 3])\n        with col_a:\n            if max_drift >= 200:\n                st.error(f"Max drift: {max_drift:.0f} bps")\n            elif max_drift >= 100:\n                st.warning(f"Max drift: {max_drift:.0f} bps")\n            else:\n                st.success(f"Max drift: {max_drift:.0f} bps")\n\n        display_drift = drift_df.drop(columns=["_drift_abs"])\n        st.dataframe(display_drift, use_container_width=True, hide_index=True)\n\n        # --- Drift bar chart ---\n        chart_data = []\n        for _, row in drift_df.iterrows():\n            chart_data.append({\n                "Category": row["Category"],\n                "Drift (bps)": float(row["Drift (bps)"].replace("+", "")),\n            })\n        if chart_data:\n            chart_df = pd.DataFrame(chart_data)\n            fig = px.bar(\n                chart_df, x="Category", y="Drift (bps)",\n                color="Drift (bps)",\n                color_continuous_scale=["#ff4444", "#888888", "#44bb44"],\n                color_continuous_midpoint=0,\n            )\n            fig.update_layout(\n                height=350,\n                paper_bgcolor="rgba(0,0,0,0)",\n                plot_bgcolor="rgba(0,0,0,0)",\n                font={"color": "#ccc"},\n                xaxis_tickangle=-45,\n                showlegend=False,\n            )\n            fig.add_hline(y=200, line_dash="dash", line_color="red",\n                         annotation_text="Rebalance threshold (+200bp)")\n            fig.add_hline(y=-200, line_dash="dash", line_color="red",\n                         annotation_text="Rebalance threshold (-200bp)")\n            st.plotly_chart(fig, use_container_width=True)\n\n    else:\n        st.info("No target allocation available to compare against.")\n\n    st.markdown("---")\n\n    # --- Account breakdown ---\n    st.subheader("Account Breakdown")\n    raw_h = load_holdings()\n    if not raw_h.empty:\n        a1, a2 = st.columns(2)\n        with a1:\n            st.markdown("**Taxable Account**")\n            tax_h = raw_h[raw_h["account"] == "taxable"]\n            tax_invested = tax_h["market_value"].sum() or 0\n            st.metric("Invested", f"${tax_invested:,.0f}",\n                      f"${taxable_val - tax_invested:,.0f} available")\n            if not tax_h.empty:\n                for _, row in tax_h.iterrows():\n                    mv = row.get("market_value", 0) or 0\n                    pnl = row.get("unrealized_pnl", 0) or 0\n                    st.text(f"  {row['ticker']:<8s}  ${mv:>9,.0f}  P&L ${pnl:>+8,.0f}")\n\n        with a2:\n            st.markdown("**Roth IRA**")\n            roth_h = raw_h[raw_h["account"] == "roth_ira"]\n            roth_invested = roth_h["market_value"].sum() or 0\n            st.metric("Invested", f"${roth_invested:,.0f}",\n                      f"${roth_val - roth_invested:,.0f} available")\n            if not roth_h.empty:\n                for _, row in roth_h.iterrows():\n                    mv = row.get("market_value", 0) or 0\n                    pnl = row.get("unrealized_pnl", 0) or 0\n                    st.text(f"  {row['ticker']:<8s}  ${mv:>9,.0f}  P&L ${pnl:>+8,.0f}")\n\n    st.markdown("---")\n\n    # --- Trade history ---\n    with st.expander("Trade History"):\n        trades_df = load_trades()\n        if not trades_df.empty:\n            display_t = trades_df.copy()\n            display_t["price"] = display_t["price"].apply(lambda x: f"${x:,.2f}")\n            display_t["total_cost"] = display_t["total_cost"].apply(lambda x: f"${x:,.2f}")\n            display_t["shares"] = display_t["shares"].apply(lambda x: f"{x:,.2f}")\n            display_t = display_t.rename(columns={\n                "date": "Date", "ticker": "Ticker", "action": "Action",\n                "shares": "Shares", "price": "Price", "total_cost": "Total",\n                "account": "Account", "notes": "Notes",\n            })\n            st.dataframe(display_t, use_container_width=True, hide_index=True)\n        else:\n            st.info("No trades recorded yet.")\n\n\n# ===========================================================================\n# PAGE 3: SIGNAL DETAIL\n# ===========================================================================\ndef page_signal_detail():\n    st.title("Signal Detail")\n    st.caption("Deep dive into regime signals, factor scores, NLP sentiment, and macro indicators")\n\n    tab1, tab2, tab3, tab4 = st.tabs([\n        "Wedge Volume", "Factor Scores", "NLP Sentiment", "Macro Indicators"\n    ])\n\n    # --- Tab 1: Wedge Volume History ---\n    with tab1:\n        st.subheader("Wedge Volume Percentile \u2014 2-Year History")\n        hist = load_regime_history()\n        if not hist.empty and "wedge_volume_percentile" in hist.columns:\n            fig = go.Figure()\n            fig.add_trace(go.Scatter(\n                x=hist["date"], y=hist["wedge_volume_percentile"],\n                mode="lines", name="Wedge Volume %",\n                line={"color": "#6c63ff", "width": 2},\n                fill="tozeroy", fillcolor="rgba(108,99,255,0.1)",\n            ))\n            thresholds = cfg.get("regime", {}).get("thresholds", {})\n            fig.add_hline(y=thresholds.get("panic_upper", 5),\n                         line_dash="dash", line_color="#ff4444",\n                         annotation_text="Panic (5th)")\n            fig.add_hline(y=thresholds.get("defense_upper", 30),\n                         line_dash="dash", line_color="#ffc107",\n                         annotation_text="Defense (30th)")\n            fig.update_layout(\n                height=400, yaxis={"title": "Percentile", "range": [0, 100]},\n                xaxis={"title": "Date"},\n                margin=dict(t=20, b=40, l=60, r=20),\n                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",\n                font={"color": "#ccc"},\n            )\n            st.plotly_chart(fig, use_container_width=True)\n        else:\n            st.info("No wedge volume history available.")\n\n    # --- Tab 2: Factor Score Trends ---\n    with tab2:\n        st.subheader("Factor Score Trends by Sector")\n        factor_df = load_factor_history()\n        if not factor_df.empty and "sector_etf" in factor_df.columns:\n            sector_filter = st.multiselect(\n                "Filter sectors:",\n                factor_df["sector_etf"].unique().tolist(),\n                default=factor_df["sector_etf"].unique().tolist()[:5],\n            )\n            filtered = factor_df[factor_df["sector_etf"].isin(sector_filter)]\n            if not filtered.empty:\n                fig = px.line(\n                    filtered, x="date", y="composite_score",\n                    color="sector_etf",\n                    title="Composite Factor Scores Over Time",\n                    labels={"composite_score": "Score", "date": "Date"},\n                )\n                fig.update_layout(\n                    height=400,\n                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",\n                    font={"color": "#ccc"},\n                )\n                st.plotly_chart(fig, use_container_width=True)\n\n            # Latest scores table\n            latest_date = factor_df["date"].max()\n            latest = factor_df[factor_df["date"] == latest_date].sort_values(\n                "composite_score", ascending=False\n            )\n            st.subheader(f"Latest Scores ({latest_date})")\n            st.dataframe(latest[["sector_etf", "composite_score"]].reset_index(drop=True),\n                        use_container_width=True, hide_index=True)\n        else:\n            st.info("No factor score data available.")\n\n    # --- Tab 3: NLP Sentiment ---\n    with tab3:\n        st.subheader("NLP Sentiment by Sector")\n        nlp_df = load_nlp_sector_signals()\n        if not nlp_df.empty and "sector_score" in nlp_df.columns:\n            # Active only in Offense\n            current_regime = regime_state.get("dominant_regime", "offense")\n            if current_regime != "offense":\n                st.warning(f"NLP sentiment is monitoring-only in {current_regime.upper()} mode. "\n                          f"Scores shown for reference only (weight = 0%).")\n\n            nlp_weight = cfg.get("nlp", {}).get("regime_weights", {}).get(current_regime, 0)\n            st.caption(f"NLP composite weight in current regime: {nlp_weight:.0%}")\n\n            # Bar chart of sector scores\n            latest_nlp = nlp_df.drop_duplicates(subset="sector_etf", keep="first")\n            fig = px.bar(\n                latest_nlp.sort_values("sector_score", ascending=True),\n                x="sector_score", y="sector_etf",\n                orientation="h",\n                color="sector_score",\n                color_continuous_scale=["#ff4444", "#ffc107", "#00d26a"],\n                color_continuous_midpoint=0,\n                labels={"sector_score": "Sentiment Score", "sector_etf": "Sector ETF"},\n            )\n            fig.update_layout(\n                height=400,\n                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",\n                font={"color": "#ccc"}, showlegend=False,\n            )\n            st.plotly_chart(fig, use_container_width=True)\n\n            # Drift risk\n            drift_col = nlp_df.get("drift_risk", pd.Series([0]))\n            if drift_col.any():\n                st.error("\u26a0\ufe0f NLP Regime Drift Risk: HIGH \u2014 VIX elevated above configured threshold")\n            else:\n                st.success("NLP Regime Drift Risk: LOW")\n        else:\n            st.info("No NLP sentiment data available.")\n\n    # --- Tab 4: Macro Indicators ---\n    with tab4:\n        st.subheader("Macro Indicator Dashboard")\n        macro_df = load_macro_data()\n        if not macro_df.empty:\n            MACRO_NAMES = {\n                "FEDFUNDS": "Federal Funds Rate",\n                "T10Y2Y": "10Y-2Y Treasury Spread",\n                "CPIAUCSL": "CPI (Year-over-Year)",\n                "UNRATE": "Unemployment Rate",\n                "CFNAI": "Chicago Fed National Activity Index",\n                "INDPRO": "Industrial Production",\n            }\n            for _, row in macro_df.iterrows():\n                series = row.get("series_id", row.get("series", ""))\n                name = MACRO_NAMES.get(series, series)\n                value = row.get("value", "N/A")\n                date = row.get("date", "N/A")\n                st.metric(name, f"{value}", help=f"As of {date}")\n        else:\n            st.info("No macro data available. Ensure FRED_API_KEY is set.")\n\n\n# ===========================================================================\n# PAGE 4: STOCK SCREENER\n# ===========================================================================\ndef page_stock_screener():\n    st.title("Stock Screener")\n    st.caption("Top buy candidates, thematic watchlists, and recent filings")\n\n    tab1, tab2, tab3 = st.tabs([\n        "Top Candidates", "Thematic Watchlists", "Recent 8-K Filings"\n    ])\n\n    # --- Tab 1: Top Candidates ---\n    with tab1:\n        st.subheader("Top 5-7 Buy Candidates per Overweight Sector")\n        factor_df = load_factor_history()\n        if not factor_df.empty and "composite_score" in factor_df.columns:\n            latest_date = factor_df["date"].max()\n            latest = factor_df[factor_df["date"] == latest_date].sort_values(\n                "composite_score", ascending=False\n            )\n            st.dataframe(latest.head(7).reset_index(drop=True),\n                        use_container_width=True, hide_index=True)\n        else:\n            st.info("No factor score data. Run Phase 3B stock screener to populate.")\n\n    # --- Tab 2: Thematic Watchlists ---\n    with tab2:\n        st.subheader("Thematic Watchlists")\n        tickers = cfg.get("tickers", {})\n        watchlists = {\n            "\ud83e\uddec Biotech": tickers.get("watchlist_biotech", []),\n            "\ud83e\udd16 AI / Cyber": tickers.get("watchlist_ai_software", []),\n            "\ud83d\udee1\ufe0f Defense": tickers.get("watchlist_defense", []),\n            "\u26cf\ufe0f Green Materials": tickers.get("watchlist_green_materials", []),\n        }\n\n        nlp_scores = load_nlp_scores()\n        score_map = {}\n        if not nlp_scores.empty and "ticker" in nlp_scores.columns:\n            for _, row in nlp_scores.iterrows():\n                score_map[row["ticker"]] = row.get("sentiment_score", 0)\n\n        for wl_name, wl_tickers in watchlists.items():\n            st.markdown(f"#### {wl_name}")\n            wl_rows = []\n            for t in wl_tickers:\n                score = score_map.get(t, None)\n                if score is not None:\n                    if score > 0.2:\n                        label = "\u2705 BUY"\n                    elif score > -0.1:\n                        label = "\u26a0\ufe0f HOLD"\n                    else:\n                        label = "\u274c AVOID"\n                else:\n                    label = "\u2014 No data"\n                wl_rows.append({\n                    "Ticker": t,\n                    "NLP Score": f"{score:.3f}" if score is not None else "N/A",\n                    "Signal": label,\n                })\n            st.dataframe(pd.DataFrame(wl_rows), use_container_width=True, hide_index=True)\n\n    # --- Tab 3: Recent 8-K Filings ---\n    with tab3:\n        st.subheader("Recent 8-K Filings with NLP Summaries")\n        filings = load_filings()\n        if not filings.empty:\n            for _, filing in filings.iterrows():\n                ticker = filing.get("ticker", "N/A")\n                filing_type = filing.get("filing_type", "N/A")\n                date = filing.get("date", "N/A")\n                text_col = "raw_text" if "raw_text" in filing.index else "text"\n                text = filing.get(text_col, "")\n                summary = text[:300] + "..." if len(str(text)) > 300 else text\n\n                with st.expander(f"\ud83d\udcc4 {ticker} \u2014 {filing_type} ({date})"):\n                    st.write(summary)\n\n                    # NLP score for this filing\n                    score = score_map.get(ticker, None)\n                    if score is not None:\n                        color = "green" if score > 0.1 else "red" if score < -0.1 else "orange"\n                        st.markdown(f"NLP Sentiment: :{color}[{score:.3f}]")\n        else:\n            st.info("No filings data available.")\n\n\n# ===========================================================================\n# PAGE 5: ALERTS LOG\n# ===========================================================================\ndef page_alerts_log():\n    st.title("Alerts Log")\n    st.caption("Historical alerts, regime transitions, and rebalance history")\n\n    tab1, tab2 = st.tabs(["Alert History", "Regime Transitions"])\n\n    # --- Tab 1: Alert History ---\n    with tab1:\n        st.subheader("Monitor Run History")\n        runs = load_alerts_history()\n        if not runs.empty:\n            for _, run in runs.iterrows():\n                date = run.get("date", "N/A")\n                status = run.get("status", "N/A")\n                regime = run.get("regime", "N/A")\n                alerts_json = run.get("alerts_json", "[]")\n\n                try:\n                    alerts = json.loads(alerts_json) if alerts_json else []\n                except (json.JSONDecodeError, TypeError):\n                    alerts = []\n\n                status_icon = "\u2705" if status == "ok" else "\u274c"\n                alert_count = len(alerts)\n                alert_badge = f"\ud83d\udd34 {alert_count} alert(s)" if alert_count > 0 else "No alerts"\n\n                with st.expander(f"{status_icon} {date} \u2014 {regime.upper() if regime else 'N/A'} \u2014 {alert_badge}"):\n                    st.write(f"**Status:** {status}")\n                    st.write(f"**Started:** {run.get('started_at', 'N/A')}")\n                    st.write(f"**Finished:** {run.get('finished_at', 'N/A')}")\n\n                    if alerts:\n                        for a in alerts:\n                            sev = a.get("severity", "LOW")\n                            badge_class = f"badge-{sev.lower()}"\n                            st.markdown(\n                                f"<span class='{badge_class}'>{sev}</span> "\n                                f"**{a.get('type', '')}** \u2014 {a.get('message', '')[:200]}",\n                                unsafe_allow_html=True,\n                            )\n\n                    report = run.get("report_text", "")\n                    if report:\n                        with st.expander("View Full Report"):\n                            st.code(report[:5000], language="text")\n        else:\n            st.info("No monitor runs recorded yet.")\n\n    # --- Tab 2: Regime Transitions ---\n    with tab2:\n        st.subheader("Regime Transition Log")\n        hist = load_regime_history()\n        if not hist.empty:\n            transitions = []\n            prev_regime = None\n            for _, row in hist.iterrows():\n                r = row.get("dominant_regime", "offense")\n                if r != prev_regime and prev_regime is not None:\n                    transitions.append({\n                        "Date": row["date"],\n                        "From": prev_regime.upper(),\n                        "To": r.upper(),\n                        "Confirmed": "Yes" if row.get("regime_confirmed") else "No",\n                        "Wedge Vol %": f"{row.get('wedge_volume_percentile', 0):.1f}%",\n                    })\n                prev_regime = r\n\n            if transitions:\n                st.dataframe(pd.DataFrame(transitions), use_container_width=True, hide_index=True)\n            else:\n                st.info("No regime transitions detected in history.")\n        else:\n            st.info("No regime history data available.")\n\n\n# ===========================================================================\n# PAGE 6: BACKTESTER\n# ===========================================================================\ndef page_backtester():\n    st.title("Backtester")\n    st.caption("Standard backtest and Failure Mode Stress Tests (Section 9)")\n\n    mclean_pontiff = cfg.get("factor_model", {}).get("mclean_pontiff_decay", 0.74)\n    mclean_label = cfg.get("backtest", {}).get("mclean_pontiff_label",\n        "(in-sample, apply 26% McLean-Pontiff decay to alpha differential for forward estimate)")\n\n    tab1, tab2 = st.tabs(["Standard Backtest", "Failure Mode Stress Tests"])\n\n    # --- Tab 1: Standard Backtest ---\n    with tab1:\n        st.subheader("Cumulative Returns vs. SPY Buy-and-Hold")\n        st.info(f"\u26a0\ufe0f All performance metrics shown are in-sample. {mclean_label}")\n\n        col1, col2 = st.columns(2)\n        with col1:\n            start_date = st.date_input("Start Date",\n                                        dt.date.today() - dt.timedelta(days=365))\n        with col2:\n            end_date = st.date_input("End Date", dt.date.today())\n\n        if st.button("Run Backtest", type="primary"):\n            prices = load_prices(["SPY"], days=(dt.date.today() - start_date).days + 30)\n            if not prices.empty:\n                spy = prices[prices["ticker"] == "SPY"].copy()\n                spy["date"] = pd.to_datetime(spy["date"])\n                spy = spy[(spy["date"] >= pd.Timestamp(start_date)) &\n                          (spy["date"] <= pd.Timestamp(end_date))]\n                spy = spy.sort_values("date")\n\n                if len(spy) > 1:\n                    spy["return"] = spy["close"].pct_change()\n                    spy["cum_return"] = (1 + spy["return"]).cumprod() - 1\n\n                    # Simulate system returns (apply regime overlay)\n                    hist = load_regime_history(days=(dt.date.today() - start_date).days + 30)\n                    regime_dates = {}\n                    if not hist.empty:\n                        for _, row in hist.iterrows():\n                            regime_dates[row["date"]] = row.get("dominant_regime", "offense")\n\n                    # System applies cash drag in defense/panic\n                    system_returns = []\n                    for _, row in spy.iterrows():\n                        d = row["date"].strftime("%Y-%m-%d")\n                        r = row.get("return", 0) or 0\n                        regime = regime_dates.get(d, "offense")\n                        if regime == "panic":\n                            r = r * 0.15  # 85% cash\n                        elif regime == "defense":\n                            r = r * 0.55  # 45% cash\n                        system_returns.append(r)\n\n                    spy["system_return"] = system_returns\n                    spy["system_cum"] = (1 + spy["system_return"]).cumprod() - 1\n\n                    # Chart\n                    fig = go.Figure()\n                    fig.add_trace(go.Scatter(\n                        x=spy["date"], y=spy["cum_return"] * 100,\n                        name="SPY Buy & Hold",\n                        line={"color": "#888", "dash": "dot"},\n                    ))\n                    fig.add_trace(go.Scatter(\n                        x=spy["date"], y=spy["system_cum"] * 100,\n                        name="Rotation System",\n                        line={"color": "#6c63ff", "width": 2},\n                    ))\n                    fig.update_layout(\n                        height=400,\n                        yaxis={"title": "Cumulative Return (%)"}, xaxis={"title": "Date"},\n                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",\n                        font={"color": "#ccc"},\n                    )\n                    st.plotly_chart(fig, use_container_width=True)\n\n                    # Metrics\n                    spy_total = spy["cum_return"].iloc[-1] * 100\n                    sys_total = spy["system_cum"].iloc[-1] * 100\n                    alpha_raw = sys_total - spy_total\n\n                    # Max drawdown\n                    spy_dd = _max_drawdown(spy["close"])\n                    sys_prices = (1 + spy["system_return"]).cumprod()\n                    sys_dd = _max_drawdown(sys_prices)\n\n                    # Calmar ratio (annualized return / max drawdown)\n                    years = len(spy) / 252\n                    spy_ann = ((1 + spy_total / 100) ** (1 / max(years, 0.01)) - 1) * 100\n                    sys_ann = ((1 + sys_total / 100) ** (1 / max(years, 0.01)) - 1) * 100\n                    spy_calmar = spy_ann / abs(spy_dd) if spy_dd != 0 else 0\n                    sys_calmar = sys_ann / abs(sys_dd) if sys_dd != 0 else 0\n\n                    # McLean-Pontiff adjusted alpha\n                    alpha_adjusted = alpha_raw * mclean_pontiff\n\n                    m1, m2, m3, m4 = st.columns(4)\n                    m1.metric("SPY Return", f"{spy_total:.1f}%")\n                    m2.metric("System Return", f"{sys_total:.1f}%")\n                    m3.metric("Raw Alpha", f"{alpha_raw:+.1f}%")\n                    m4.metric("Adj. Alpha (MP)", f"{alpha_adjusted:+.1f}%",\n                             help=mclean_label)\n\n                    m5, m6, m7, m8 = st.columns(4)\n                    m5.metric("SPY Max DD", f"{spy_dd:.1f}%")\n                    m6.metric("System Max DD", f"{sys_dd:.1f}%")\n                    m7.metric("SPY Calmar", f"{spy_calmar:.2f}")\n                    m8.metric("System Calmar", f"{sys_calmar:.2f}")\n\n                    st.markdown(f"*{mclean_label}*")\n                else:\n                    st.warning("Not enough price data for selected range.")\n            else:\n                st.warning("No SPY price data available.")\n\n    # --- Tab 2: Failure Mode Stress Tests ---\n    with tab2:\n        st.subheader("Failure Mode Stress Tests")\n        st.markdown("Three named scenarios from Section 9 of the strategy report:")\n\n        stress_cfg = cfg.get("backtest", {}).get("stress_tests", {})\n\n        # Scenario buttons\n        scenario = st.radio(\n            "Select scenario:",\n            [\n                "Policy Shock Test (Section 9.1)",\n                "Incomplete Panic Test (Section 9.2)",\n                "Extended Bull Market Test (Section 9.3)",\n            ],\n        )\n\n        if st.button("Run Stress Test", type="primary"):\n            if "Policy Shock" in scenario:\n                _run_policy_shock_test(stress_cfg, mclean_label)\n            elif "Incomplete Panic" in scenario:\n                _run_incomplete_panic_test(stress_cfg, mclean_label)\n            elif "Extended Bull" in scenario:\n                _run_extended_bull_test(stress_cfg, mclean_label)\n\n\ndef _max_drawdown(prices) -> float:\n    \"\"\"Compute max drawdown as a negative percentage.\"\"\"\n    if len(prices) < 2:\n        return 0.0\n    cummax = prices.cummax()\n    dd = (prices - cummax) / cummax\n    return dd.min() * 100\n\n\ndef _run_policy_shock_test(stress_cfg: dict, mclean_label: str):\n    \"\"\"Section 9.1: S&P drops >3% with no prior wedge deterioration.\"\"\"\n    st.markdown("### Policy Shock Test (Section 9.1)")\n    st.markdown(\"\"\"\n    **Scenario:** The S&P 500 drops more than 3% in a single day, BUT there was\n    no prior deterioration of wedge volume below the 15th percentile. The system\n    is still in Offense mode when the shock hits.\n\n    **Purpose:** Expose the detection gap \u2014 the system can't catch exogenous shocks\n    that don't build gradually through correlation changes.\n    \"\"\")\n\n    shock_pct = stress_cfg.get("policy_shock", {}).get("sp500_drop_threshold", -0.03)\n    pre_wv = stress_cfg.get("policy_shock", {}).get("wedge_volume_pre_threshold", 15)\n\n    np.random.seed(91)\n    days = 60\n    dates = pd.date_range(end=dt.date.today(), periods=days, freq="B")\n\n    # Normal market, then sudden shock on day 45\n    returns = np.random.normal(0.0005, 0.008, days)\n    returns[44] = shock_pct  # The policy shock day\n    returns[45] = -0.015     # Continued selling\n    returns[46] = 0.012      # Partial recovery\n\n    prices = 100 * np.cumprod(1 + returns)\n    wv_pct = np.full(days, 55.0)\n    wv_pct[44:] = np.linspace(55, 8, days - 44)  # Drops AFTER the shock\n\n    # System response: stays in offense (wv was fine before shock)\n    system_returns = returns.copy()\n    # System doesn't react until day 46 when regime transitions\n    # Day 44-45: full exposure, day 46+: transition to defense\n    system_returns[46:] *= 0.55\n\n    spy_cum = (pd.Series(1 + returns).cumprod() - 1) * 100\n    sys_cum = (pd.Series(1 + system_returns).cumprod() - 1) * 100\n\n    fig = go.Figure()\n    fig.add_trace(go.Scatter(x=dates, y=spy_cum, name="SPY", line={"color": "#888", "dash": "dot"}))\n    fig.add_trace(go.Scatter(x=dates, y=sys_cum, name="System", line={"color": "#6c63ff"}))\n    fig.add_vline(x=dates[44], line_dash="dash", line_color="red",\n                  annotation_text="Shock Day")\n    fig.update_layout(\n        height=350, yaxis={"title": "Cumulative Return (%)"},\n        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",\n        font={"color": "#ccc"},\n    )\n    st.plotly_chart(fig, use_container_width=True)\n\n    # Detection gap\n    gap = abs(returns[44]) * 100\n    st.error(f"**Detection Gap:** System took the full {gap:.1f}% hit on shock day "\n             f"because wedge volume was at {wv_pct[43]:.0f}th percentile "\n             f"(above {pre_wv}th threshold). Regime transition didn't begin until "\n             f"2 days after the shock.")\n    st.markdown(f\"\"\"\n    **Staged Exit Protocol Response:**\n    - Day 0 (shock): No action \u2014 system in Offense\n    - Day +1: Wedge volume begins dropping \u2192 watching for confirmation\n    - Day +2: Regime transitions to Defense \u2192 50% cash move\n    - Day +3-5: Complete transition to Defense allocation\n\n    *{mclean_label}*\n    \"\"\")\n\n\ndef _run_incomplete_panic_test(stress_cfg: dict, mclean_label: str):\n    \"\"\"Section 9.2: 2022-analog sustained drawdown without correlation spike.\"\"\"\n    st.markdown("### Incomplete Panic Test (Section 9.2)")\n    st.markdown(\"\"\"\n    **Scenario:** A 2022-style year \u2014 sustained drawdown (~25%) without the\n    correlation spike that would trigger Panic mode. The system stays in Defense\n    (elevated cash) the entire year.\n\n    **Purpose:** Show the cash drag cost vs. protection benefit. This is the\n    scenario most likely to cause mandate abandonment.\n    \"\"\")\n\n    analog_year = stress_cfg.get("incomplete_panic", {}).get("analog_year", 2022)\n\n    np.random.seed(2022)\n    days = 252\n    dates = pd.date_range(end=dt.date.today(), periods=days, freq="B")\n\n    # 2022-style: gradual drawdown with rallies\n    trend = np.linspace(0, -0.25, days)\n    noise = np.random.normal(0, 0.012, days)\n    spy_prices = 100 * np.exp(trend + np.cumsum(noise) * 0.3)\n    spy_returns = np.diff(spy_prices) / spy_prices[:-1]\n    spy_returns = np.insert(spy_returns, 0, 0)\n\n    # System: in defense (45% equity exposure) for most of the year\n    system_returns = spy_returns * 0.55  # 45% cash allocation\n\n    spy_cum = (pd.Series(1 + spy_returns).cumprod() - 1) * 100\n    sys_cum = (pd.Series(1 + system_returns).cumprod() - 1) * 100\n\n    fig = go.Figure()\n    fig.add_trace(go.Scatter(x=dates, y=spy_cum, name="SPY", line={"color": "#888", "dash": "dot"}))\n    fig.add_trace(go.Scatter(x=dates, y=sys_cum, name="System (Defense)", line={"color": "#ffc107"}))\n    fig.update_layout(\n        height=350, yaxis={"title": "Cumulative Return (%)"},\n        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",\n        font={"color": "#ccc"},\n    )\n    st.plotly_chart(fig, use_container_width=True)\n\n    spy_dd = spy_cum.min()\n    sys_dd = sys_cum.min()\n    protection = abs(spy_dd) - abs(sys_dd)\n\n    # Cash drag on rally days\n    rally_mask = spy_returns > 0\n    cash_drag = (spy_returns[rally_mask] * 0.45).sum() * 100\n\n    c1, c2, c3 = st.columns(3)\n    c1.metric("SPY Max Drawdown", f"{spy_dd:.1f}%")\n    c2.metric("System Max Drawdown", f"{sys_dd:.1f}%")\n    c3.metric("Protection Benefit", f"{protection:.1f}%")\n\n    st.warning(f"**Cash Drag on Rally Days:** {cash_drag:.1f}% of potential gains missed "\n               f"due to 45% cash allocation in Defense mode. This is the cost of protection "\n               f"when no crisis materializes.")\n    st.markdown(f\"\"\"\n    **Mandate Abandonment Risk:** After {days} trading days in Defense without a Panic event,\n    the system's Extended Defense Alert (at day 60) recommends partial re-entry.\n    Without discipline to the process, many users would override the system here.\n\n    *{mclean_label}*\n    \"\"\")\n\n\ndef _run_extended_bull_test(stress_cfg: dict, mclean_label: str):\n    \"\"\"Section 9.3: 10 years with no Panic events.\"\"\"\n    st.markdown("### Extended Bull Market Test (Section 9.3)")\n    st.markdown(\"\"\"\n    **Scenario:** 10 years of bull market with no Panic events. The system\n    compounds annual drag from VIX roll cost, false-positive Defense triggers,\n    and cash buffer \u2014 showing cumulative underperformance vs. buy-and-hold.\n\n    **Purpose:** Show the honest long-term cost of insurance when no crisis\n    justifies it.\n    \"\"\")\n\n    drag_range = stress_cfg.get("extended_bull", {}).get("annual_drag_range", [0.005, 0.012])\n    duration = stress_cfg.get("extended_bull", {}).get("duration_years", 10)\n\n    np.random.seed(42)\n    years = np.arange(0, duration + 1)\n    spy_annual = 0.10  # 10% annual return\n    drag_low = drag_range[0]\n    drag_high = drag_range[1]\n\n    spy_growth = (1 + spy_annual) ** years\n    sys_growth_low = (1 + spy_annual - drag_low) ** years\n    sys_growth_high = (1 + spy_annual - drag_high) ** years\n\n    fig = go.Figure()\n    fig.add_trace(go.Scatter(\n        x=years, y=(spy_growth - 1) * 100,\n        name="SPY Buy & Hold",\n        line={"color": "#888", "dash": "dot", "width": 2},\n    ))\n    fig.add_trace(go.Scatter(\n        x=years, y=(sys_growth_low - 1) * 100,\n        name=f"System (min drag {drag_low:.1%}/yr)",\n        line={"color": "#00d26a", "width": 2},\n    ))\n    fig.add_trace(go.Scatter(\n        x=years, y=(sys_growth_high - 1) * 100,\n        name=f"System (max drag {drag_high:.1%}/yr)",\n        line={"color": "#ff4444", "width": 2},\n    ))\n    # Fill between\n    fig.add_trace(go.Scatter(\n        x=np.concatenate([years, years[::-1]]),\n        y=np.concatenate([(sys_growth_low - 1) * 100, ((sys_growth_high - 1) * 100)[::-1]]),\n        fill="toself", fillcolor="rgba(255,68,68,0.1)",\n        line={"color": "rgba(0,0,0,0)"},\n        showlegend=False,\n    ))\n    fig.update_layout(\n        height=400,\n        xaxis={"title": "Years", "dtick": 1},\n        yaxis={"title": "Cumulative Return (%)"},\n        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",\n        font={"color": "#ccc"},\n    )\n    st.plotly_chart(fig, use_container_width=True)\n\n    # Dollar impact on $144K\n    total_val = cfg.get("portfolio", {}).get("total_value", 144000)\n    spy_end = total_val * spy_growth[-1]\n    sys_end_low = total_val * sys_growth_low[-1]\n    sys_end_high = total_val * sys_growth_high[-1]\n    cost_low = spy_end - sys_end_low\n    cost_high = spy_end - sys_end_high\n\n    c1, c2, c3 = st.columns(3)\n    c1.metric("SPY Final Value", f"${spy_end:,.0f}")\n    c2.metric("System (min drag)", f"${sys_end_low:,.0f}",\n             delta=f"-${cost_low:,.0f}", delta_color="inverse")\n    c3.metric("System (max drag)", f"${sys_end_high:,.0f}",\n             delta=f"-${cost_high:,.0f}", delta_color="inverse")\n\n    st.markdown(f\"\"\"\n    **Drag Breakdown (annual):**\n    | Component | Low Estimate | High Estimate |\n    |-----------|-------------|---------------|\n    | VIX roll cost | 0.2% | 0.5% |\n    | False-positive Defense triggers | 0.2% | 0.4% |\n    | Cash buffer (BIL underperformance) | 0.1% | 0.3% |\n    | **Total annual drag** | **{drag_low:.1%}** | **{drag_high:.1%}** |\n\n    Over {duration} years on ${total_val:,.0f}, this costs **${cost_low:,.0f}\u2013${cost_high:,.0f}**\n    in cumulative underperformance vs. buy-and-hold \u2014 *if no crisis occurs to justify it.*\n\n    *{mclean_label}*\n    \"\"\")\n\n\n# ===========================================================================\n# ROUTER\n# ===========================================================================\nif page == PAGES[0]:\n    page_regime_dashboard()\nelif page == PAGES[1]:\n    page_portfolio_allocation()\nelif page == PAGES[2]:\n    page_my_holdings()\nelif page == PAGES[3]:\n    page_signal_detail()\nelif page == PAGES[4]:\n    page_stock_screener()\nelif page == PAGES[5]:\n    page_alerts_log()\nelif page == PAGES[6]:\n    page_backtester()\n
+"""
+dashboard.py — Phase 6: Streamlit Dashboard
+==============================================
+Global Sector Rotation System
+
+A visual interface you can check anytime — from desktop or phone.
+Deployable to Streamlit Community Cloud (free).
+
+Pages:
+  1. Regime Dashboard   — gauge, probability bars, Fast Shock, timeline
+  2. Portfolio Allocation — dual-account table, historical toggle
+  3. Signal Detail       — wedge volume history, factor trends, NLP, macro
+  4. Stock Screener      — top candidates, watchlists, 8-K filings
+  5. Alerts Log          — historical alerts, regime transitions
+  6. Backtester          — standard + 3 failure-mode stress tests
+
+Run locally:
+  streamlit run dashboard.py
+
+Dependencies: streamlit, plotly, pandas, numpy, pyyaml
+"""
+
+import datetime as dt
+import json
+import math
+import sqlite3
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+import yaml
+
+# ---------------------------------------------------------------------------
+# PATHS  (relative to this file)
+# ---------------------------------------------------------------------------
+BASE_DIR = Path(__file__).parent
+CONFIG_PATH = BASE_DIR / "config.yaml"
+DB_PATH = BASE_DIR / "rotation_system.db"
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=300)
+def load_config() -> dict:
+    with open(CONFIG_PATH, "r") as f:
+        return yaml.safe_load(f)
+
+# ---------------------------------------------------------------------------
+# DATABASE HELPERS
+# ---------------------------------------------------------------------------
+def get_db() -> sqlite3.Connection:
+    return sqlite3.connect(str(DB_PATH), check_same_thread=False)
+
+@st.cache_data(ttl=60)
+def query_df(sql: str, params: tuple = ()) -> pd.DataFrame:
+    conn = get_db()
+    try:
+        return pd.read_sql_query(sql, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+def query_one(sql: str, params: tuple = ()) -> Optional[tuple]:
+    conn = get_db()
+    try:
+        return conn.execute(sql, params).fetchone()
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# DATA LOADERS
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=60)
+def load_latest_regime() -> Dict:
+    row = query_one(
+        "SELECT date, signal_data FROM signals "
+        "WHERE signal_type = 'regime_state' "
+        "ORDER BY date DESC LIMIT 1"
+    )
+    if row:
+        data = json.loads(row[1])
+        data["date"] = row[0]
+        return data
+    return {
+        "date": None, "dominant_regime": "offense",
+        "wedge_volume_percentile": 50.0,
+        "regime_probabilities": {"panic": 0.0, "defense": 0.0, "offense": 1.0},
+        "fast_shock_risk": "low", "vix_rv_ratio": 0.0,
+        "consecutive_days_in_regime": 0, "regime_confirmed": False,
+    }
+
+
+@st.cache_data(ttl=60)
+def load_regime_history(days: int = 730) -> pd.DataFrame:
+    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    df = query_df(
+        "SELECT date, signal_data FROM signals "
+        "WHERE signal_type = 'regime_state' AND date >= ? "
+        "ORDER BY date ASC",
+        (cutoff,),
+    )
+    if df.empty:
+        return pd.DataFrame()
+    records = []
+    for _, row in df.iterrows():
+        d = json.loads(row["signal_data"])
+        d["date"] = row["date"]
+        records.append(d)
+    return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=60)
+def load_latest_allocation() -> Optional[Dict]:
+    row = query_one(
+        "SELECT date, regime, allocation_json, dollar_taxable, dollar_roth "
+        "FROM allocations ORDER BY date DESC LIMIT 1"
+    )
+    if row:
+        return {
+            "date": row[0], "regime": row[1],
+            "allocations": json.loads(row[2]) if row[2] else {},
+            "taxable_dollars": json.loads(row[3]) if row[3] else {},
+            "roth_dollars": json.loads(row[4]) if row[4] else {},
+        }
+    return None
+
+
+@st.cache_data(ttl=60)
+def load_all_allocations() -> pd.DataFrame:
+    return query_df(
+        "SELECT date, regime, allocation_json AS allocations, "
+        "dollar_taxable AS taxable_dollars, dollar_roth AS roth_dollars "
+        "FROM allocations ORDER BY date DESC"
+    )
+
+
+@st.cache_data(ttl=60)
+def load_factor_history(days: int = 730) -> pd.DataFrame:
+    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    df = query_df(
+        "SELECT date, signal_data FROM signals "
+        "WHERE signal_type = 'factor_scores' AND date >= ? "
+        "ORDER BY date ASC",
+        (cutoff,),
+    )
+    if df.empty:
+        return pd.DataFrame()
+    records = []
+    for _, row in df.iterrows():
+        d = json.loads(row["signal_data"])
+        for s in d.get("sector_scores", []):
+            s["date"] = row["date"]
+            records.append(s)
+    return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=60)
+def load_nlp_sector_signals() -> pd.DataFrame:
+    return query_df(
+        "SELECT * FROM nlp_sector_signals ORDER BY date DESC LIMIT 50"
+    )
+
+
+@st.cache_data(ttl=60)
+def load_macro_data() -> pd.DataFrame:
+    return query_df("SELECT * FROM macro_data ORDER BY date DESC")
+
+
+@st.cache_data(ttl=60)
+def load_prices(tickers: List[str] = None, days: int = 730) -> pd.DataFrame:
+    cutoff = (dt.date.today() - dt.timedelta(days=days)).isoformat()
+    if tickers:
+        placeholders = ",".join("?" * len(tickers))
+        return query_df(
+            f"SELECT date, ticker, close FROM prices "
+            f"WHERE date >= ? AND ticker IN ({placeholders}) "
+            f"ORDER BY date ASC",
+            (cutoff, *tickers),
+        )
+    return query_df(
+        "SELECT date, ticker, close FROM prices WHERE date >= ? ORDER BY date ASC",
+        (cutoff,),
+    )
+
+
+@st.cache_data(ttl=60)
+def load_alerts_history() -> pd.DataFrame:
+    return query_df(
+        "SELECT * FROM monitor_runs ORDER BY date DESC LIMIT 200"
+    )
+
+
+@st.cache_data(ttl=60)
+def load_filings() -> pd.DataFrame:
+    return query_df("SELECT * FROM filings ORDER BY date DESC LIMIT 50")
+
+
+@st.cache_data(ttl=60)
+def load_nlp_scores() -> pd.DataFrame:
+    return query_df("SELECT * FROM nlp_scores ORDER BY date DESC LIMIT 50")
+
+
+# ===========================================================================
+# PAGE SETUP
+# ===========================================================================
+st.set_page_config(
+    page_title="Sector Rotation System",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# --- Custom CSS ---
+st.markdown("""
+<style>
+    /* Hide default Streamlit branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+
+    /* Metric cards */
+    .metric-card {
+        background: linear-gradient(135deg, #1e1e2e 0%, #2d2d44 100%);
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        border: 1px solid rgba(255,255,255,0.08);
+    }
+    .metric-value {
+        font-size: 2.2rem;
+        font-weight: 700;
+        margin: 4px 0;
+    }
+    .metric-label {
+        font-size: 0.85rem;
+        color: #8888aa;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+
+    /* Regime colors */
+    .regime-offense { color: #00d26a; }
+    .regime-defense { color: #ffc107; }
+    .regime-panic   { color: #ff4444; }
+
+    /* Severity badges */
+    .badge-critical {
+        background: #ff4444; color: white; padding: 2px 10px;
+        border-radius: 4px; font-weight: 600; font-size: 0.8rem;
+    }
+    .badge-high {
+        background: #ffc107; color: #1e1e2e; padding: 2px 10px;
+        border-radius: 4px; font-weight: 600; font-size: 0.8rem;
+    }
+    .badge-medium {
+        background: #17a2b8; color: white; padding: 2px 10px;
+        border-radius: 4px; font-weight: 600; font-size: 0.8rem;
+    }
+    .badge-low {
+        background: #6c757d; color: white; padding: 2px 10px;
+        border-radius: 4px; font-weight: 600; font-size: 0.8rem;
+    }
+
+    /* Table styling */
+    .allocation-table th {
+        background: #2d2d44;
+        color: #8888aa;
+        text-transform: uppercase;
+        font-size: 0.75rem;
+        letter-spacing: 1px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ===========================================================================
+# SIDEBAR NAVIGATION
+# ===========================================================================
+cfg = load_config()
+
+PAGES = [
+    "📈 Regime Dashboard",
+    "💼 Portfolio Allocation",
+    "🏦 My Holdings",
+    "🔍 Signal Detail",
+    "🎯 Stock Screener",
+    "🔔 Alerts Log",
+    "📊 Backtester",
+]
+
+st.sidebar.title("Sector Rotation System")
+st.sidebar.markdown("---")
+page = st.sidebar.radio("Navigation", PAGES, label_visibility="collapsed")
+
+# Show current regime in sidebar
+regime_state = load_latest_regime()
+regime = regime_state.get("dominant_regime", "offense").upper()
+regime_color = {"OFFENSE": "#00d26a", "DEFENSE": "#ffc107", "PANIC": "#ff4444"}.get(regime, "#888")
+st.sidebar.markdown(f"""
+<div style="text-align:center; padding:12px; margin-top:8px;
+     background:rgba(255,255,255,0.03); border-radius:8px;
+     border:1px solid {regime_color}40;">
+    <div style="font-size:0.7rem; color:#888; text-transform:uppercase;
+         letter-spacing:2px;">Current Regime</div>
+    <div style="font-size:1.6rem; font-weight:700; color:{regime_color};
+         margin:4px 0;">{regime}</div>
+    <div style="font-size:0.75rem; color:#aaa;">
+        Day {regime_state.get('consecutive_days_in_regime', 0)} ·
+        {'Confirmed' if regime_state.get('regime_confirmed') else 'Unconfirmed'}
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+st.sidebar.markdown(f"""
+<div style="text-align:center; padding:8px; margin-top:6px; font-size:0.7rem; color:#666;">
+    Data as of {regime_state.get('date', 'N/A')}
+</div>
+""", unsafe_allow_html=True)
+
+
+# ===========================================================================
+# PAGE 1: REGIME DASHBOARD
+# ===========================================================================
+def page_regime_dashboard():
+    st.title("Regime Dashboard")
+    st.caption("Live system state — wedge volume, regime probabilities, and Fast Shock Risk")
+
+    # --- Top metrics row ---
+    col1, col2, col3, col4 = st.columns(4)
+
+    wv_pct = regime_state.get("wedge_volume_percentile", 0)
+    vix_rv = regime_state.get("vix_rv_ratio", 0)
+    fast_shock = regime_state.get("fast_shock_risk", "low").upper()
+    consec = regime_state.get("consecutive_days_in_regime", 0)
+    confirmed = "YES" if regime_state.get("regime_confirmed") else "NO"
+
+    with col1:
+        st.metric("Wedge Volume Percentile", f"{wv_pct:.1f}%")
+    with col2:
+        st.metric("VIX / RV Ratio", f"{vix_rv:.2f}")
+    with col3:
+        shock_color = "🔴" if fast_shock == "HIGH" else "🟢"
+        st.metric("Fast Shock Risk", f"{shock_color} {fast_shock}")
+    with col4:
+        st.metric("Regime Day", f"{consec} (Confirmed: {confirmed})")
+
+    st.markdown("---")
+
+    # --- Wedge Volume Gauge ---
+    col_gauge, col_probs = st.columns([1, 1])
+
+    with col_gauge:
+        st.subheader("Wedge Volume Gauge")
+        thresholds = cfg.get("regime", {}).get("thresholds", {})
+        panic_upper = thresholds.get("panic_upper", 5)
+        defense_upper = thresholds.get("defense_upper", 30)
+
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=wv_pct,
+            number={"suffix": "%", "font": {"size": 42}},
+            gauge={
+                "axis": {"range": [0, 100], "tickwidth": 1},
+                "bar": {"color": regime_color, "thickness": 0.3},
+                "steps": [
+                    {"range": [0, panic_upper], "color": "rgba(255,68,68,0.3)"},
+                    {"range": [panic_upper, defense_upper], "color": "rgba(255,193,7,0.3)"},
+                    {"range": [defense_upper, 100], "color": "rgba(0,210,106,0.3)"},
+                ],
+                "threshold": {
+                    "line": {"color": "white", "width": 3},
+                    "thickness": 0.8,
+                    "value": wv_pct,
+                },
+            },
+            title={"text": "Wedge Volume Percentile", "font": {"size": 14}},
+        ))
+        fig_gauge.update_layout(
+            height=280, margin=dict(t=40, b=20, l=30, r=30),
+            paper_bgcolor="rgba(0,0,0,0)",
+            font={"color": "#ccc"},
+        )
+        st.plotly_chart(fig_gauge, use_container_width=True)
+
+    with col_probs:
+        st.subheader("Regime Probabilities")
+        probs = regime_state.get("regime_probabilities", {})
+        prob_data = pd.DataFrame({
+            "Regime": ["Offense", "Defense", "Panic"],
+            "Probability": [
+                probs.get("offense", 0) * 100,
+                probs.get("defense", 0) * 100,
+                probs.get("panic", 0) * 100,
+            ],
+        })
+        fig_probs = px.bar(
+            prob_data, x="Probability", y="Regime",
+            orientation="h",
+            color="Regime",
+            color_discrete_map={
+                "Offense": "#00d26a", "Defense": "#ffc107", "Panic": "#ff4444"
+            },
+            text="Probability",
+        )
+        fig_probs.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig_probs.update_layout(
+            height=280, showlegend=False,
+            xaxis={"range": [0, 105], "title": "Probability (%)", "showgrid": True},
+            yaxis={"title": ""},
+            margin=dict(t=40, b=20, l=10, r=40),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font={"color": "#ccc"},
+        )
+        st.plotly_chart(fig_probs, use_container_width=True)
+
+    # --- Historical Regime Timeline ---
+    st.subheader("Historical Regime Timeline")
+    hist = load_regime_history()
+    if not hist.empty:
+        regime_map = {"offense": 3, "defense": 2, "panic": 1}
+        color_map = {"offense": "#00d26a", "defense": "#ffc107", "panic": "#ff4444"}
+
+        hist["regime_num"] = hist["dominant_regime"].map(regime_map)
+        hist["color"] = hist["dominant_regime"].map(color_map)
+
+        fig_timeline = go.Figure()
+
+        # Regime band shading
+        for regime_name, num in regime_map.items():
+            mask = hist["dominant_regime"] == regime_name
+            if mask.any():
+                fig_timeline.add_trace(go.Scatter(
+                    x=hist.loc[mask, "date"],
+                    y=hist.loc[mask, "regime_num"],
+                    mode="markers",
+                    marker={"color": color_map[regime_name], "size": 6},
+                    name=regime_name.capitalize(),
+                    hovertemplate="%{x}<br>Regime: " + regime_name.capitalize() + "<extra></extra>",
+                ))
+
+        fig_timeline.update_layout(
+            height=250,
+            yaxis={
+                "tickvals": [1, 2, 3],
+                "ticktext": ["Panic", "Defense", "Offense"],
+                "title": "",
+            },
+            xaxis={"title": "Date"},
+            margin=dict(t=20, b=40, l=60, r=20),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font={"color": "#ccc"},
+            showlegend=True,
+            legend={"orientation": "h", "y": 1.12},
+        )
+        st.plotly_chart(fig_timeline, use_container_width=True)
+
+        # Wedge volume history overlay
+        if "wedge_volume_percentile" in hist.columns:
+            st.subheader("Wedge Volume Percentile History")
+            fig_wv = go.Figure()
+            fig_wv.add_trace(go.Scatter(
+                x=hist["date"], y=hist["wedge_volume_percentile"],
+                mode="lines", name="Wedge Volume %",
+                line={"color": "#6c63ff", "width": 2},
+            ))
+            # Add threshold lines
+            fig_wv.add_hline(y=panic_upper, line_dash="dash",
+                            line_color="#ff4444", annotation_text="Panic threshold")
+            fig_wv.add_hline(y=defense_upper, line_dash="dash",
+                            line_color="#ffc107", annotation_text="Defense threshold")
+            fig_wv.update_layout(
+                height=280,
+                yaxis={"title": "Percentile", "range": [0, 100]},
+                xaxis={"title": "Date"},
+                margin=dict(t=20, b=40, l=60, r=20),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font={"color": "#ccc"},
+            )
+            st.plotly_chart(fig_wv, use_container_width=True)
+    else:
+        st.info("No regime history data available. Run `monitor.py --mock` to populate.")
+
+
+# ===========================================================================
+# PAGE 2: PORTFOLIO ALLOCATION
+# ===========================================================================
+def page_portfolio_allocation():
+    st.title("Portfolio Allocation")
+
+    alloc = load_latest_allocation()
+    total_val = cfg.get("portfolio", {}).get("total_value", 144000)
+    taxable_val = cfg.get("portfolio", {}).get("accounts", {}).get("taxable", {}).get("value", 100000)
+    roth_val = cfg.get("portfolio", {}).get("accounts", {}).get("roth_ira", {}).get("value", 44000)
+
+    if alloc:
+        st.caption(f"As of: {alloc['date']} · Regime: {alloc['regime'].upper()}")
+
+        # --- Top metrics ---
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Portfolio", f"${total_val:,.0f}")
+        m2.metric("Taxable Account", f"${taxable_val:,.0f}")
+        m3.metric("Roth IRA", f"${roth_val:,.0f}")
+
+        st.markdown("---")
+
+        # --- Allocation table ---
+        DISPLAY_NAMES = {
+            "us_equities": "US Equities (ETFs)",
+            "intl_developed": "Intl Developed",
+            "em_equities": "EM Equities",
+            "energy_materials": "Energy / Materials",
+            "healthcare": "Healthcare (ETF)",
+            "cash_short_duration": "Cash / BIL",
+            "vix_overlay_notional": "VIX Overlay (notional)",
+        }
+
+        weights = alloc.get("allocations", {})
+        tax_d = alloc.get("taxable_dollars", {})
+        roth_d = alloc.get("roth_dollars", {})
+
+        rows = []
+        for key, display in DISPLAY_NAMES.items():
+            pct = weights.get(key, 0) or 0
+            target_dollar = round(pct * total_val, 2)
+            taxable = tax_d.get(key, 0) or 0
+            roth = roth_d.get(key, 0) or 0
+            rows.append({
+                "Category": display,
+                "Target %": f"{pct:.1%}",
+                "Target $": f"${target_dollar:,.0f}",
+                "Taxable $": f"${taxable:,.0f}" if taxable > 0 else "—",
+                "Roth IRA $": f"${roth:,.0f}" if roth > 0 else "—",
+            })
+
+        # Total row
+        total_pct = sum(weights.get(k, 0) or 0 for k in DISPLAY_NAMES)
+        total_tax = sum(tax_d.get(k, 0) or 0 for k in DISPLAY_NAMES)
+        total_roth = sum(roth_d.get(k, 0) or 0 for k in DISPLAY_NAMES)
+        rows.append({
+            "Category": "TOTAL",
+            "Target %": f"{total_pct:.1%}",
+            "Target $": f"${total_val:,.0f}",
+            "Taxable $": f"${total_tax:,.0f}",
+            "Roth IRA $": f"${total_roth:,.0f}",
+        })
+
+        df_alloc = pd.DataFrame(rows)
+        st.dataframe(
+            df_alloc,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Category": st.column_config.TextColumn(width="large"),
+            },
+        )
+
+        # --- Pie chart ---
+        st.subheader("Allocation Breakdown")
+        pie_data = []
+        for key, display in DISPLAY_NAMES.items():
+            pct = weights.get(key, 0) or 0
+            if pct > 0:
+                pie_data.append({"Category": display, "Weight": pct})
+        if pie_data:
+            pie_df = pd.DataFrame(pie_data)
+            fig_pie = px.pie(
+                pie_df, names="Category", values="Weight",
+                color="Category",
+                color_discrete_sequence=px.colors.qualitative.Set2,
+                hole=0.4,
+            )
+            fig_pie.update_traces(textposition="outside", textinfo="label+percent")
+            fig_pie.update_layout(
+                height=400,
+                margin=dict(t=20, b=20),
+                paper_bgcolor="rgba(0,0,0,0)",
+                font={"color": "#ccc"},
+                showlegend=False,
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        # --- Historical allocations toggle ---
+        st.markdown("---")
+        with st.expander("📅 View Historical Allocations"):
+            all_allocs = load_all_allocations()
+            if not all_allocs.empty:
+                selected_date = st.selectbox(
+                    "Select date:",
+                    all_allocs["date"].tolist(),
+                )
+                sel_row = all_allocs[all_allocs["date"] == selected_date].iloc[0]
+                hist_weights = json.loads(sel_row["allocations"]) if sel_row["allocations"] else {}
+                hist_tax = json.loads(sel_row["taxable_dollars"]) if sel_row["taxable_dollars"] else {}
+                hist_roth = json.loads(sel_row["roth_dollars"]) if sel_row["roth_dollars"] else {}
+
+                hist_rows = []
+                for key, display in DISPLAY_NAMES.items():
+                    pct = hist_weights.get(key, 0) or 0
+                    hist_rows.append({
+                        "Category": display,
+                        "Target %": f"{pct:.1%}",
+                        "Target $": f"${pct * total_val:,.0f}",
+                        "Taxable $": f"${hist_tax.get(key, 0):,.0f}" if hist_tax.get(key, 0) else "—",
+                        "Roth IRA $": f"${hist_roth.get(key, 0):,.0f}" if hist_roth.get(key, 0) else "—",
+                    })
+                st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("No historical allocation data.")
+    else:
+        st.info("No allocation data available. Run `monitor.py --mock` to populate.")
+
+
+# ===========================================================================
+# PAGE 2B: MY HOLDINGS (actual vs target)
+# ===========================================================================
+
+def load_holdings() -> pd.DataFrame:
+    """Load current holdings from DB."""
+    return query_df(
+        "SELECT ticker, account, shares, avg_cost, cost_basis, current_price, "
+        "market_value, unrealized_pnl, asset_class, weight_pct, updated_at "
+        "FROM holdings WHERE shares > 0 ORDER BY market_value DESC"
+    )
+
+
+def load_trades(limit: int = 50) -> pd.DataFrame:
+    """Load recent trade history."""
+    return query_df(
+        "SELECT date, ticker, action, shares, price, total_cost, account, notes "
+        "FROM trades ORDER BY date DESC, trade_id DESC LIMIT ?",
+        (limit,),
+    )
+
+
+def page_my_holdings():
+    st.title("My Holdings")
+    st.caption("Actual portfolio positions vs system target allocation")
+
+    total_val = cfg.get("portfolio", {}).get("total_value", 144000)
+    taxable_val = cfg.get("portfolio", {}).get("accounts", {}).get("taxable", {}).get("value", 100000)
+    roth_val = cfg.get("portfolio", {}).get("accounts", {}).get("roth_ira", {}).get("value", 44000)
+
+    holdings_df = load_holdings()
+
+    if holdings_df.empty:
+        st.warning(
+            "No holdings recorded yet. Use the holdings tracker CLI to log your trades:\n\n"
+            "```bash\n"
+            "python holdings_tracker.py buy XLK 50 --price 210.00 --account taxable\n"
+            "```"
+        )
+        return
+
+    # --- Top metrics ---
+    total_invested = holdings_df["market_value"].sum() or 0
+    total_pnl = holdings_df["unrealized_pnl"].sum() or 0
+    total_cost = holdings_df["cost_basis"].sum() if "cost_basis" in holdings_df.columns else 0
+    deployment_pct = total_invested / total_val * 100 if total_val > 0 else 0
+    pnl_pct = total_pnl / total_cost * 100 if total_cost > 0 else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Invested", f"${total_invested:,.0f}", f"{deployment_pct:.1f}% deployed")
+    m2.metric("Cash", f"${total_val - total_invested:,.0f}")
+    m3.metric("Unrealized P&L", f"${total_pnl:,.0f}",
+             f"{pnl_pct:+.1f}%" if total_cost > 0 else None,
+             delta_color="normal")
+    m4.metric("Positions", f"{len(holdings_df)}")
+
+    st.markdown("---")
+
+    # --- Holdings table ---
+    st.subheader("Current Positions")
+
+    display_df = holdings_df.copy()
+    for col in ["avg_cost", "current_price"]:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"${x:,.2f}" if pd.notna(x) else "—"
+            )
+    for col in ["market_value", "unrealized_pnl"]:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"${x:,.2f}" if pd.notna(x) else "—"
+            )
+    if "weight_pct" in display_df.columns:
+        display_df["weight_pct"] = display_df["weight_pct"].apply(
+            lambda x: f"{x:.1f}%" if pd.notna(x) else "—"
+        )
+    if "shares" in display_df.columns:
+        display_df["shares"] = display_df["shares"].apply(
+            lambda x: f"{x:,.2f}" if pd.notna(x) else "—"
+        )
+
+    display_df = display_df.rename(columns={
+        "ticker": "Ticker", "account": "Account", "shares": "Shares",
+        "avg_cost": "Avg Cost", "current_price": "Price",
+        "market_value": "Market Value", "unrealized_pnl": "P&L",
+        "weight_pct": "Weight", "asset_class": "Asset Class",
+    })
+    display_cols = ["Ticker", "Account", "Shares", "Avg Cost", "Price",
+                    "Market Value", "P&L", "Weight", "Asset Class"]
+    display_cols = [c for c in display_cols if c in display_df.columns]
+
+    st.dataframe(
+        display_df[display_cols],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("---")
+
+    # --- Drift comparison ---
+    st.subheader("Asset Class Drift (Actual vs Target)")
+
+    alloc = load_latest_allocation()
+    if alloc:
+        target_weights = alloc.get("allocations", {})
+
+        # Aggregate actual holdings by asset class
+        raw_holdings = load_holdings()
+        actual_by_class = {}
+        if not raw_holdings.empty and "asset_class" in raw_holdings.columns:
+            for _, row in raw_holdings.iterrows():
+                cls = row.get("asset_class", "other")
+                mv = row.get("market_value", 0) or 0
+                actual_by_class[cls] = actual_by_class.get(cls, 0) + mv
+
+        DISPLAY_NAMES = {
+            "us_equities": "US Equities",
+            "intl_developed": "Intl Developed",
+            "em_equities": "EM Equities",
+            "energy_materials": "Energy / Materials",
+            "healthcare": "Healthcare",
+            "industry_sub": "Industry Sub-Sectors",
+            "thematic": "Thematic",
+            "cash_short_duration": "Cash / Short Duration",
+        }
+
+        drift_rows = []
+        for key, display in DISPLAY_NAMES.items():
+            target = target_weights.get(key, 0)
+            if isinstance(target, dict):
+                target = target.get("pct", 0) / 100.0
+            target = float(target or 0)
+
+            actual_dollars = actual_by_class.get(key, 0)
+            actual_pct = actual_dollars / total_val if total_val > 0 else 0
+
+            drift_bps = (actual_pct - target) * 10000
+
+            drift_rows.append({
+                "Category": display,
+                "Actual %": f"{actual_pct:.1%}",
+                "Target %": f"{target:.1%}",
+                "Drift (bps)": f"{drift_bps:+.0f}",
+                "Actual $": f"${actual_dollars:,.0f}",
+                "Target $": f"${target * total_val:,.0f}",
+                "Gap $": f"${actual_dollars - target * total_val:+,.0f}",
+                "_drift_abs": abs(drift_bps),
+            })
+
+        drift_df = pd.DataFrame(drift_rows)
+        max_drift = drift_df["_drift_abs"].max() if not drift_df.empty else 0
+
+        col_a, col_b = st.columns([1, 3])
+        with col_a:
+            if max_drift >= 200:
+                st.error(f"Max drift: {max_drift:.0f} bps")
+            elif max_drift >= 100:
+                st.warning(f"Max drift: {max_drift:.0f} bps")
+            else:
+                st.success(f"Max drift: {max_drift:.0f} bps")
+
+        display_drift = drift_df.drop(columns=["_drift_abs"])
+        st.dataframe(display_drift, use_container_width=True, hide_index=True)
+
+        # --- Drift bar chart ---
+        chart_data = []
+        for _, row in drift_df.iterrows():
+            chart_data.append({
+                "Category": row["Category"],
+                "Drift (bps)": float(row["Drift (bps)"].replace("+", "")),
+            })
+        if chart_data:
+            chart_df = pd.DataFrame(chart_data)
+            fig = px.bar(
+                chart_df, x="Category", y="Drift (bps)",
+                color="Drift (bps)",
+                color_continuous_scale=["#ff4444", "#888888", "#44bb44"],
+                color_continuous_midpoint=0,
+            )
+            fig.update_layout(
+                height=350,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font={"color": "#ccc"},
+                xaxis_tickangle=-45,
+                showlegend=False,
+            )
+            fig.add_hline(y=200, line_dash="dash", line_color="red",
+                         annotation_text="Rebalance threshold (+200bp)")
+            fig.add_hline(y=-200, line_dash="dash", line_color="red",
+                         annotation_text="Rebalance threshold (-200bp)")
+            st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.info("No target allocation available to compare against.")
+
+    st.markdown("---")
+
+    # --- Account breakdown ---
+    st.subheader("Account Breakdown")
+    raw_h = load_holdings()
+    if not raw_h.empty:
+        a1, a2 = st.columns(2)
+        with a1:
+            st.markdown("**Taxable Account**")
+            tax_h = raw_h[raw_h["account"] == "taxable"]
+            tax_invested = tax_h["market_value"].sum() or 0
+            st.metric("Invested", f"${tax_invested:,.0f}",
+                      f"${taxable_val - tax_invested:,.0f} available")
+            if not tax_h.empty:
+                for _, row in tax_h.iterrows():
+                    mv = row.get("market_value", 0) or 0
+                    pnl = row.get("unrealized_pnl", 0) or 0
+                    st.text(f"  {row['ticker']:<8s}  ${mv:>9,.0f}  P&L ${pnl:>+8,.0f}")
+
+        with a2:
+            st.markdown("**Roth IRA**")
+            roth_h = raw_h[raw_h["account"] == "roth_ira"]
+            roth_invested = roth_h["market_value"].sum() or 0
+            st.metric("Invested", f"${roth_invested:,.0f}",
+                      f"${roth_val - roth_invested:,.0f} available")
+            if not roth_h.empty:
+                for _, row in roth_h.iterrows():
+                    mv = row.get("market_value", 0) or 0
+                    pnl = row.get("unrealized_pnl", 0) or 0
+                    st.text(f"  {row['ticker']:<8s}  ${mv:>9,.0f}  P&L ${pnl:>+8,.0f}")
+
+    st.markdown("---")
+
+    # --- Trade history ---
+    with st.expander("Trade History"):
+        trades_df = load_trades()
+        if not trades_df.empty:
+            display_t = trades_df.copy()
+            display_t["price"] = display_t["price"].apply(lambda x: f"${x:,.2f}")
+            display_t["total_cost"] = display_t["total_cost"].apply(lambda x: f"${x:,.2f}")
+            display_t["shares"] = display_t["shares"].apply(lambda x: f"{x:,.2f}")
+            display_t = display_t.rename(columns={
+                "date": "Date", "ticker": "Ticker", "action": "Action",
+                "shares": "Shares", "price": "Price", "total_cost": "Total",
+                "account": "Account", "notes": "Notes",
+            })
+            st.dataframe(display_t, use_container_width=True, hide_index=True)
+        else:
+            st.info("No trades recorded yet.")
+
+
+# ===========================================================================
+# PAGE 3: SIGNAL DETAIL
+# ===========================================================================
+def page_signal_detail():
+    st.title("Signal Detail")
+    st.caption("Deep dive into regime signals, factor scores, NLP sentiment, and macro indicators")
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Wedge Volume", "Factor Scores", "NLP Sentiment", "Macro Indicators"
+    ])
+
+    # --- Tab 1: Wedge Volume History ---
+    with tab1:
+        st.subheader("Wedge Volume Percentile — 2-Year History")
+        hist = load_regime_history()
+        if not hist.empty and "wedge_volume_percentile" in hist.columns:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=hist["date"], y=hist["wedge_volume_percentile"],
+                mode="lines", name="Wedge Volume %",
+                line={"color": "#6c63ff", "width": 2},
+                fill="tozeroy", fillcolor="rgba(108,99,255,0.1)",
+            ))
+            thresholds = cfg.get("regime", {}).get("thresholds", {})
+            fig.add_hline(y=thresholds.get("panic_upper", 5),
+                         line_dash="dash", line_color="#ff4444",
+                         annotation_text="Panic (5th)")
+            fig.add_hline(y=thresholds.get("defense_upper", 30),
+                         line_dash="dash", line_color="#ffc107",
+                         annotation_text="Defense (30th)")
+            fig.update_layout(
+                height=400, yaxis={"title": "Percentile", "range": [0, 100]},
+                xaxis={"title": "Date"},
+                margin=dict(t=20, b=40, l=60, r=20),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font={"color": "#ccc"},
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No wedge volume history available.")
+
+    # --- Tab 2: Factor Score Trends ---
+    with tab2:
+        st.subheader("Factor Score Trends by Sector")
+        factor_df = load_factor_history()
+        if not factor_df.empty and "sector_etf" in factor_df.columns:
+            sector_filter = st.multiselect(
+                "Filter sectors:",
+                factor_df["sector_etf"].unique().tolist(),
+                default=factor_df["sector_etf"].unique().tolist()[:5],
+            )
+            filtered = factor_df[factor_df["sector_etf"].isin(sector_filter)]
+            if not filtered.empty:
+                fig = px.line(
+                    filtered, x="date", y="composite_score",
+                    color="sector_etf",
+                    title="Composite Factor Scores Over Time",
+                    labels={"composite_score": "Score", "date": "Date"},
+                )
+                fig.update_layout(
+                    height=400,
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font={"color": "#ccc"},
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Latest scores table
+            latest_date = factor_df["date"].max()
+            latest = factor_df[factor_df["date"] == latest_date].sort_values(
+                "composite_score", ascending=False
+            )
+            st.subheader(f"Latest Scores ({latest_date})")
+            st.dataframe(latest[["sector_etf", "composite_score"]].reset_index(drop=True),
+                        use_container_width=True, hide_index=True)
+        else:
+            st.info("No factor score data available.")
+
+    # --- Tab 3: NLP Sentiment ---
+    with tab3:
+        st.subheader("NLP Sentiment by Sector")
+        nlp_df = load_nlp_sector_signals()
+        if not nlp_df.empty and "sector_score" in nlp_df.columns:
+            # Active only in Offense
+            current_regime = regime_state.get("dominant_regime", "offense")
+            if current_regime != "offense":
+                st.warning(f"NLP sentiment is monitoring-only in {current_regime.upper()} mode. "
+                          f"Scores shown for reference only (weight = 0%).")
+
+            nlp_weight = cfg.get("nlp", {}).get("regime_weights", {}).get(current_regime, 0)
+            st.caption(f"NLP composite weight in current regime: {nlp_weight:.0%}")
+
+            # Bar chart of sector scores
+            latest_nlp = nlp_df.drop_duplicates(subset="sector_etf", keep="first")
+            fig = px.bar(
+                latest_nlp.sort_values("sector_score", ascending=True),
+                x="sector_score", y="sector_etf",
+                orientation="h",
+                color="sector_score",
+                color_continuous_scale=["#ff4444", "#ffc107", "#00d26a"],
+                color_continuous_midpoint=0,
+                labels={"sector_score": "Sentiment Score", "sector_etf": "Sector ETF"},
+            )
+            fig.update_layout(
+                height=400,
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font={"color": "#ccc"}, showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Drift risk
+            drift_col = nlp_df.get("drift_risk", pd.Series([0]))
+            if drift_col.any():
+                st.error("⚠️ NLP Regime Drift Risk: HIGH — VIX elevated above configured threshold")
+            else:
+                st.success("NLP Regime Drift Risk: LOW")
+        else:
+            st.info("No NLP sentiment data available.")
+
+    # --- Tab 4: Macro Indicators ---
+    with tab4:
+        st.subheader("Macro Indicator Dashboard")
+        macro_df = load_macro_data()
+        if not macro_df.empty:
+            MACRO_NAMES = {
+                "FEDFUNDS": "Federal Funds Rate",
+                "T10Y2Y": "10Y-2Y Treasury Spread",
+                "CPIAUCSL": "CPI (Year-over-Year)",
+                "UNRATE": "Unemployment Rate",
+                "CFNAI": "Chicago Fed National Activity Index",
+                "INDPRO": "Industrial Production",
+            }
+            for _, row in macro_df.iterrows():
+                series = row.get("series_id", row.get("series", ""))
+                name = MACRO_NAMES.get(series, series)
+                value = row.get("value", "N/A")
+                date = row.get("date", "N/A")
+                st.metric(name, f"{value}", help=f"As of {date}")
+        else:
+            st.info("No macro data available. Ensure FRED_API_KEY is set.")
+
+
+# ===========================================================================
+# PAGE 4: STOCK SCREENER
+# ===========================================================================
+def page_stock_screener():
+    st.title("Stock Screener")
+    st.caption("Top buy candidates, thematic watchlists, and recent filings")
+
+    tab1, tab2, tab3 = st.tabs([
+        "Top Candidates", "Thematic Watchlists", "Recent 8-K Filings"
+    ])
+
+    # --- Tab 1: Top Candidates ---
+    with tab1:
+        st.subheader("Top 5-7 Buy Candidates per Overweight Sector")
+        factor_df = load_factor_history()
+        if not factor_df.empty and "composite_score" in factor_df.columns:
+            latest_date = factor_df["date"].max()
+            latest = factor_df[factor_df["date"] == latest_date].sort_values(
+                "composite_score", ascending=False
+            )
+            st.dataframe(latest.head(7).reset_index(drop=True),
+                        use_container_width=True, hide_index=True)
+        else:
+            st.info("No factor score data. Run Phase 3B stock screener to populate.")
+
+    # --- Tab 2: Thematic Watchlists ---
+    with tab2:
+        st.subheader("Thematic Watchlists")
+        tickers = cfg.get("tickers", {})
+        watchlists = {
+            "🧬 Biotech": tickers.get("watchlist_biotech", []),
+            "🤖 AI / Cyber": tickers.get("watchlist_ai_software", []),
+            "🛡️ Defense": tickers.get("watchlist_defense", []),
+            "⛏️ Green Materials": tickers.get("watchlist_green_materials", []),
+        }
+
+        nlp_scores = load_nlp_scores()
+        score_map = {}
+        if not nlp_scores.empty and "ticker" in nlp_scores.columns:
+            for _, row in nlp_scores.iterrows():
+                score_map[row["ticker"]] = row.get("sentiment_score", 0)
+
+        for wl_name, wl_tickers in watchlists.items():
+            st.markdown(f"#### {wl_name}")
+            wl_rows = []
+            for t in wl_tickers:
+                score = score_map.get(t, None)
+                if score is not None:
+                    if score > 0.2:
+                        label = "✅ BUY"
+                    elif score > -0.1:
+                        label = "⚠️ HOLD"
+                    else:
+                        label = "❌ AVOID"
+                else:
+                    label = "— No data"
+                wl_rows.append({
+                    "Ticker": t,
+                    "NLP Score": f"{score:.3f}" if score is not None else "N/A",
+                    "Signal": label,
+                })
+            st.dataframe(pd.DataFrame(wl_rows), use_container_width=True, hide_index=True)
+
+    # --- Tab 3: Recent 8-K Filings ---
+    with tab3:
+        st.subheader("Recent 8-K Filings with NLP Summaries")
+        filings = load_filings()
+        if not filings.empty:
+            for _, filing in filings.iterrows():
+                ticker = filing.get("ticker", "N/A")
+                filing_type = filing.get("filing_type", "N/A")
+                date = filing.get("date", "N/A")
+                text_col = "raw_text" if "raw_text" in filing.index else "text"
+                text = filing.get(text_col, "")
+                summary = text[:300] + "..." if len(str(text)) > 300 else text
+
+                with st.expander(f"📄 {ticker} — {filing_type} ({date})"):
+                    st.write(summary)
+
+                    # NLP score for this filing
+                    score = score_map.get(ticker, None)
+                    if score is not None:
+                        color = "green" if score > 0.1 else "red" if score < -0.1 else "orange"
+                        st.markdown(f"NLP Sentiment: :{color}[{score:.3f}]")
+        else:
+            st.info("No filings data available.")
+
+
+# ===========================================================================
+# PAGE 5: ALERTS LOG
+# ===========================================================================
+def page_alerts_log():
+    st.title("Alerts Log")
+    st.caption("Historical alerts, regime transitions, and rebalance history")
+
+    tab1, tab2 = st.tabs(["Alert History", "Regime Transitions"])
+
+    # --- Tab 1: Alert History ---
+    with tab1:
+        st.subheader("Monitor Run History")
+        runs = load_alerts_history()
+        if not runs.empty:
+            for _, run in runs.iterrows():
+                date = run.get("date", "N/A")
+                status = run.get("status", "N/A")
+                regime = run.get("regime", "N/A")
+                alerts_json = run.get("alerts_json", "[]")
+
+                try:
+                    alerts = json.loads(alerts_json) if alerts_json else []
+                except (json.JSONDecodeError, TypeError):
+                    alerts = []
+
+                status_icon = "✅" if status == "ok" else "❌"
+                alert_count = len(alerts)
+                alert_badge = f"🔴 {alert_count} alert(s)" if alert_count > 0 else "No alerts"
+
+                with st.expander(f"{status_icon} {date} — {regime.upper() if regime else 'N/A'} — {alert_badge}"):
+                    st.write(f"**Status:** {status}")
+                    st.write(f"**Started:** {run.get('started_at', 'N/A')}")
+                    st.write(f"**Finished:** {run.get('finished_at', 'N/A')}")
+
+                    if alerts:
+                        for a in alerts:
+                            sev = a.get("severity", "LOW")
+                            badge_class = f"badge-{sev.lower()}"
+                            st.markdown(
+                                f"<span class='{badge_class}'>{sev}</span> "
+                                f"**{a.get('type', '')}** — {a.get('message', '')[:200]}",
+                                unsafe_allow_html=True,
+                            )
+
+                    report = run.get("report_text", "")
+                    if report:
+                        with st.expander("View Full Report"):
+                            st.code(report[:5000], language="text")
+        else:
+            st.info("No monitor runs recorded yet.")
+
+    # --- Tab 2: Regime Transitions ---
+    with tab2:
+        st.subheader("Regime Transition Log")
+        hist = load_regime_history()
+        if not hist.empty:
+            transitions = []
+            prev_regime = None
+            for _, row in hist.iterrows():
+                r = row.get("dominant_regime", "offense")
+                if r != prev_regime and prev_regime is not None:
+                    transitions.append({
+                        "Date": row["date"],
+                        "From": prev_regime.upper(),
+                        "To": r.upper(),
+                        "Confirmed": "Yes" if row.get("regime_confirmed") else "No",
+                        "Wedge Vol %": f"{row.get('wedge_volume_percentile', 0):.1f}%",
+                    })
+                prev_regime = r
+
+            if transitions:
+                st.dataframe(pd.DataFrame(transitions), use_container_width=True, hide_index=True)
+            else:
+                st.info("No regime transitions detected in history.")
+        else:
+            st.info("No regime history data available.")
+
+
+# ===========================================================================
+# PAGE 6: BACKTESTER
+# ===========================================================================
+def page_backtester():
+    st.title("Backtester")
+    st.caption("Standard backtest and Failure Mode Stress Tests (Section 9)")
+
+    mclean_pontiff = cfg.get("factor_model", {}).get("mclean_pontiff_decay", 0.74)
+    mclean_label = cfg.get("backtest", {}).get("mclean_pontiff_label",
+        "(in-sample, apply 26% McLean-Pontiff decay to alpha differential for forward estimate)")
+
+    tab1, tab2 = st.tabs(["Standard Backtest", "Failure Mode Stress Tests"])
+
+    # --- Tab 1: Standard Backtest ---
+    with tab1:
+        st.subheader("Cumulative Returns vs. SPY Buy-and-Hold")
+        st.info(f"⚠️ All performance metrics shown are in-sample. {mclean_label}")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("Start Date",
+                                        dt.date.today() - dt.timedelta(days=365))
+        with col2:
+            end_date = st.date_input("End Date", dt.date.today())
+
+        if st.button("Run Backtest", type="primary"):
+            prices = load_prices(["SPY"], days=(dt.date.today() - start_date).days + 30)
+            if not prices.empty:
+                spy = prices[prices["ticker"] == "SPY"].copy()
+                spy["date"] = pd.to_datetime(spy["date"])
+                spy = spy[(spy["date"] >= pd.Timestamp(start_date)) &
+                          (spy["date"] <= pd.Timestamp(end_date))]
+                spy = spy.sort_values("date")
+
+                if len(spy) > 1:
+                    spy["return"] = spy["close"].pct_change()
+                    spy["cum_return"] = (1 + spy["return"]).cumprod() - 1
+
+                    # Simulate system returns (apply regime overlay)
+                    hist = load_regime_history(days=(dt.date.today() - start_date).days + 30)
+                    regime_dates = {}
+                    if not hist.empty:
+                        for _, row in hist.iterrows():
+                            regime_dates[row["date"]] = row.get("dominant_regime", "offense")
+
+                    # System applies cash drag in defense/panic
+                    system_returns = []
+                    for _, row in spy.iterrows():
+                        d = row["date"].strftime("%Y-%m-%d")
+                        r = row.get("return", 0) or 0
+                        regime = regime_dates.get(d, "offense")
+                        if regime == "panic":
+                            r = r * 0.15  # 85% cash
+                        elif regime == "defense":
+                            r = r * 0.55  # 45% cash
+                        system_returns.append(r)
+
+                    spy["system_return"] = system_returns
+                    spy["system_cum"] = (1 + spy["system_return"]).cumprod() - 1
+
+                    # Chart
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=spy["date"], y=spy["cum_return"] * 100,
+                        name="SPY Buy & Hold",
+                        line={"color": "#888", "dash": "dot"},
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=spy["date"], y=spy["system_cum"] * 100,
+                        name="Rotation System",
+                        line={"color": "#6c63ff", "width": 2},
+                    ))
+                    fig.update_layout(
+                        height=400,
+                        yaxis={"title": "Cumulative Return (%)"}, xaxis={"title": "Date"},
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font={"color": "#ccc"},
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Metrics
+                    spy_total = spy["cum_return"].iloc[-1] * 100
+                    sys_total = spy["system_cum"].iloc[-1] * 100
+                    alpha_raw = sys_total - spy_total
+
+                    # Max drawdown
+                    spy_dd = _max_drawdown(spy["close"])
+                    sys_prices = (1 + spy["system_return"]).cumprod()
+                    sys_dd = _max_drawdown(sys_prices)
+
+                    # Calmar ratio (annualized return / max drawdown)
+                    years = len(spy) / 252
+                    spy_ann = ((1 + spy_total / 100) ** (1 / max(years, 0.01)) - 1) * 100
+                    sys_ann = ((1 + sys_total / 100) ** (1 / max(years, 0.01)) - 1) * 100
+                    spy_calmar = spy_ann / abs(spy_dd) if spy_dd != 0 else 0
+                    sys_calmar = sys_ann / abs(sys_dd) if sys_dd != 0 else 0
+
+                    # McLean-Pontiff adjusted alpha
+                    alpha_adjusted = alpha_raw * mclean_pontiff
+
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("SPY Return", f"{spy_total:.1f}%")
+                    m2.metric("System Return", f"{sys_total:.1f}%")
+                    m3.metric("Raw Alpha", f"{alpha_raw:+.1f}%")
+                    m4.metric("Adj. Alpha (MP)", f"{alpha_adjusted:+.1f}%",
+                             help=mclean_label)
+
+                    m5, m6, m7, m8 = st.columns(4)
+                    m5.metric("SPY Max DD", f"{spy_dd:.1f}%")
+                    m6.metric("System Max DD", f"{sys_dd:.1f}%")
+                    m7.metric("SPY Calmar", f"{spy_calmar:.2f}")
+                    m8.metric("System Calmar", f"{sys_calmar:.2f}")
+
+                    st.markdown(f"*{mclean_label}*")
+                else:
+                    st.warning("Not enough price data for selected range.")
+            else:
+                st.warning("No SPY price data available.")
+
+    # --- Tab 2: Failure Mode Stress Tests ---
+    with tab2:
+        st.subheader("Failure Mode Stress Tests")
+        st.markdown("Three named scenarios from Section 9 of the strategy report:")
+
+        stress_cfg = cfg.get("backtest", {}).get("stress_tests", {})
+
+        # Scenario buttons
+        scenario = st.radio(
+            "Select scenario:",
+            [
+                "Policy Shock Test (Section 9.1)",
+                "Incomplete Panic Test (Section 9.2)",
+                "Extended Bull Market Test (Section 9.3)",
+            ],
+        )
+
+        if st.button("Run Stress Test", type="primary"):
+            if "Policy Shock" in scenario:
+                _run_policy_shock_test(stress_cfg, mclean_label)
+            elif "Incomplete Panic" in scenario:
+                _run_incomplete_panic_test(stress_cfg, mclean_label)
+            elif "Extended Bull" in scenario:
+                _run_extended_bull_test(stress_cfg, mclean_label)
+
+
+def _max_drawdown(prices) -> float:
+    """Compute max drawdown as a negative percentage."""
+    if len(prices) < 2:
+        return 0.0
+    cummax = prices.cummax()
+    dd = (prices - cummax) / cummax
+    return dd.min() * 100
+
+
+def _run_policy_shock_test(stress_cfg: dict, mclean_label: str):
+    """Section 9.1: S&P drops >3% with no prior wedge deterioration."""
+    st.markdown("### Policy Shock Test (Section 9.1)")
+    st.markdown("""
+    **Scenario:** The S&P 500 drops more than 3% in a single day, BUT there was
+    no prior deterioration of wedge volume below the 15th percentile. The system
+    is still in Offense mode when the shock hits.
+
+    **Purpose:** Expose the detection gap — the system can't catch exogenous shocks
+    that don't build gradually through correlation changes.
+    """)
+
+    shock_pct = stress_cfg.get("policy_shock", {}).get("sp500_drop_threshold", -0.03)
+    pre_wv = stress_cfg.get("policy_shock", {}).get("wedge_volume_pre_threshold", 15)
+
+    np.random.seed(91)
+    days = 60
+    dates = pd.date_range(end=dt.date.today(), periods=days, freq="B")
+
+    # Normal market, then sudden shock on day 45
+    returns = np.random.normal(0.0005, 0.008, days)
+    returns[44] = shock_pct  # The policy shock day
+    returns[45] = -0.015     # Continued selling
+    returns[46] = 0.012      # Partial recovery
+
+    prices = 100 * np.cumprod(1 + returns)
+    wv_pct = np.full(days, 55.0)
+    wv_pct[44:] = np.linspace(55, 8, days - 44)  # Drops AFTER the shock
+
+    # System response: stays in offense (wv was fine before shock)
+    system_returns = returns.copy()
+    # System doesn't react until day 46 when regime transitions
+    # Day 44-45: full exposure, day 46+: transition to defense
+    system_returns[46:] *= 0.55
+
+    spy_cum = (pd.Series(1 + returns).cumprod() - 1) * 100
+    sys_cum = (pd.Series(1 + system_returns).cumprod() - 1) * 100
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=dates, y=spy_cum, name="SPY", line={"color": "#888", "dash": "dot"}))
+    fig.add_trace(go.Scatter(x=dates, y=sys_cum, name="System", line={"color": "#6c63ff"}))
+    fig.add_vline(x=dates[44], line_dash="dash", line_color="red",
+                  annotation_text="Shock Day")
+    fig.update_layout(
+        height=350, yaxis={"title": "Cumulative Return (%)"},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": "#ccc"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Detection gap
+    gap = abs(returns[44]) * 100
+    st.error(f"**Detection Gap:** System took the full {gap:.1f}% hit on shock day "
+             f"because wedge volume was at {wv_pct[43]:.0f}th percentile "
+             f"(above {pre_wv}th threshold). Regime transition didn't begin until "
+             f"2 days after the shock.")
+    st.markdown(f"""
+    **Staged Exit Protocol Response:**
+    - Day 0 (shock): No action — system in Offense
+    - Day +1: Wedge volume begins dropping → watching for confirmation
+    - Day +2: Regime transitions to Defense → 50% cash move
+    - Day +3-5: Complete transition to Defense allocation
+
+    *{mclean_label}*
+    """)
+
+
+def _run_incomplete_panic_test(stress_cfg: dict, mclean_label: str):
+    """Section 9.2: 2022-analog sustained drawdown without correlation spike."""
+    st.markdown("### Incomplete Panic Test (Section 9.2)")
+    st.markdown("""
+    **Scenario:** A 2022-style year — sustained drawdown (~25%) without the
+    correlation spike that would trigger Panic mode. The system stays in Defense
+    (elevated cash) the entire year.
+
+    **Purpose:** Show the cash drag cost vs. protection benefit. This is the
+    scenario most likely to cause mandate abandonment.
+    """)
+
+    analog_year = stress_cfg.get("incomplete_panic", {}).get("analog_year", 2022)
+
+    np.random.seed(2022)
+    days = 252
+    dates = pd.date_range(end=dt.date.today(), periods=days, freq="B")
+
+    # 2022-style: gradual drawdown with rallies
+    trend = np.linspace(0, -0.25, days)
+    noise = np.random.normal(0, 0.012, days)
+    spy_prices = 100 * np.exp(trend + np.cumsum(noise) * 0.3)
+    spy_returns = np.diff(spy_prices) / spy_prices[:-1]
+    spy_returns = np.insert(spy_returns, 0, 0)
+
+    # System: in defense (45% equity exposure) for most of the year
+    system_returns = spy_returns * 0.55  # 45% cash allocation
+
+    spy_cum = (pd.Series(1 + spy_returns).cumprod() - 1) * 100
+    sys_cum = (pd.Series(1 + system_returns).cumprod() - 1) * 100
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=dates, y=spy_cum, name="SPY", line={"color": "#888", "dash": "dot"}))
+    fig.add_trace(go.Scatter(x=dates, y=sys_cum, name="System (Defense)", line={"color": "#ffc107"}))
+    fig.update_layout(
+        height=350, yaxis={"title": "Cumulative Return (%)"},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": "#ccc"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    spy_dd = spy_cum.min()
+    sys_dd = sys_cum.min()
+    protection = abs(spy_dd) - abs(sys_dd)
+
+    # Cash drag on rally days
+    rally_mask = spy_returns > 0
+    cash_drag = (spy_returns[rally_mask] * 0.45).sum() * 100
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("SPY Max Drawdown", f"{spy_dd:.1f}%")
+    c2.metric("System Max Drawdown", f"{sys_dd:.1f}%")
+    c3.metric("Protection Benefit", f"{protection:.1f}%")
+
+    st.warning(f"**Cash Drag on Rally Days:** {cash_drag:.1f}% of potential gains missed "
+               f"due to 45% cash allocation in Defense mode. This is the cost of protection "
+               f"when no crisis materializes.")
+    st.markdown(f"""
+    **Mandate Abandonment Risk:** After {days} trading days in Defense without a Panic event,
+    the system's Extended Defense Alert (at day 60) recommends partial re-entry.
+    Without discipline to the process, many users would override the system here.
+
+    *{mclean_label}*
+    """)
+
+
+def _run_extended_bull_test(stress_cfg: dict, mclean_label: str):
+    """Section 9.3: 10 years with no Panic events."""
+    st.markdown("### Extended Bull Market Test (Section 9.3)")
+    st.markdown("""
+    **Scenario:** 10 years of bull market with no Panic events. The system
+    compounds annual drag from VIX roll cost, false-positive Defense triggers,
+    and cash buffer — showing cumulative underperformance vs. buy-and-hold.
+
+    **Purpose:** Show the honest long-term cost of insurance when no crisis
+    justifies it.
+    """)
+
+    drag_range = stress_cfg.get("extended_bull", {}).get("annual_drag_range", [0.005, 0.012])
+    duration = stress_cfg.get("extended_bull", {}).get("duration_years", 10)
+
+    np.random.seed(42)
+    years = np.arange(0, duration + 1)
+    spy_annual = 0.10  # 10% annual return
+    drag_low = drag_range[0]
+    drag_high = drag_range[1]
+
+    spy_growth = (1 + spy_annual) ** years
+    sys_growth_low = (1 + spy_annual - drag_low) ** years
+    sys_growth_high = (1 + spy_annual - drag_high) ** years
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=years, y=(spy_growth - 1) * 100,
+        name="SPY Buy & Hold",
+        line={"color": "#888", "dash": "dot", "width": 2},
+    ))
+    fig.add_trace(go.Scatter(
+        x=years, y=(sys_growth_low - 1) * 100,
+        name=f"System (min drag {drag_low:.1%}/yr)",
+        line={"color": "#00d26a", "width": 2},
+    ))
+    fig.add_trace(go.Scatter(
+        x=years, y=(sys_growth_high - 1) * 100,
+        name=f"System (max drag {drag_high:.1%}/yr)",
+        line={"color": "#ff4444", "width": 2},
+    ))
+    # Fill between
+    fig.add_trace(go.Scatter(
+        x=np.concatenate([years, years[::-1]]),
+        y=np.concatenate([(sys_growth_low - 1) * 100, ((sys_growth_high - 1) * 100)[::-1]]),
+        fill="toself", fillcolor="rgba(255,68,68,0.1)",
+        line={"color": "rgba(0,0,0,0)"},
+        showlegend=False,
+    ))
+    fig.update_layout(
+        height=400,
+        xaxis={"title": "Years", "dtick": 1},
+        yaxis={"title": "Cumulative Return (%)"},
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": "#ccc"},
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Dollar impact on $144K
+    total_val = cfg.get("portfolio", {}).get("total_value", 144000)
+    spy_end = total_val * spy_growth[-1]
+    sys_end_low = total_val * sys_growth_low[-1]
+    sys_end_high = total_val * sys_growth_high[-1]
+    cost_low = spy_end - sys_end_low
+    cost_high = spy_end - sys_end_high
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("SPY Final Value", f"${spy_end:,.0f}")
+    c2.metric("System (min drag)", f"${sys_end_low:,.0f}",
+             delta=f"-${cost_low:,.0f}", delta_color="inverse")
+    c3.metric("System (max drag)", f"${sys_end_high:,.0f}",
+             delta=f"-${cost_high:,.0f}", delta_color="inverse")
+
+    st.markdown(f"""
+    **Drag Breakdown (annual):**
+    | Component | Low Estimate | High Estimate |
+    |-----------|-------------|---------------|
+    | VIX roll cost | 0.2% | 0.5% |
+    | False-positive Defense triggers | 0.2% | 0.4% |
+    | Cash buffer (BIL underperformance) | 0.1% | 0.3% |
+    | **Total annual drag** | **{drag_low:.1%}** | **{drag_high:.1%}** |
+
+    Over {duration} years on ${total_val:,.0f}, this costs **${cost_low:,.0f}–${cost_high:,.0f}**
+    in cumulative underperformance vs. buy-and-hold — *if no crisis occurs to justify it.*
+
+    *{mclean_label}*
+    """)
+
+
+# ===========================================================================
+# ROUTER
+# ===========================================================================
+if page == PAGES[0]:
+    page_regime_dashboard()
+elif page == PAGES[1]:
+    page_portfolio_allocation()
+elif page == PAGES[2]:
+    page_my_holdings()
+elif page == PAGES[3]:
+    page_signal_detail()
+elif page == PAGES[4]:
+    page_stock_screener()
+elif page == PAGES[5]:
+    page_alerts_log()
+elif page == PAGES[6]:
+    page_backtester()
