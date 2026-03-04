@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "sector-rotation"
+version = "0.1.0"
+description = "Quantitative sector rotation and portfolio allocation system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "PyYAML>=6.0",
+    "yfinance>=0.2.31",
+    "pyportfolioopt>=1.5",
+    "scikit-learn>=1.3",
+    "statsmodels>=0.14",
+    "transformers>=4.35",
+    "torch>=2.0",
+    "requests>=2.31",
+    "gspread>=5.12",
+    "google-auth>=2.23",
+    "streamlit>=1.28",
+    "plotly>=5.18",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

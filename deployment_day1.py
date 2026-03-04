@@ -33,7 +33,10 @@ import yaml
 # Allow importing sibling modules
 sys.path.insert(0, str(Path(__file__).parent))
 
-from holdings_tracker import init_holdings_tables, record_trade, refresh_holdings, load_config
+try:
+    from holdings_tracker import init_holdings_tables, record_trade, refresh_holdings, load_config
+except ImportError:
+    from sector_rotation.holdings_tracker import init_holdings_tables, record_trade, refresh_holdings, load_config
 
 # ---------------------------------------------------------------------------
 # CONFIG

@@ -21,6 +21,9 @@ screen_*.csv
 alerts.json
 alerts_history.csv
 monitor.log
+rotation_system.db
+deployment_trades.csv
+etf_selections.json
 
 # OS
 .DS_Store

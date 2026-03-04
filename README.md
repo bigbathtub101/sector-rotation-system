@@ -221,6 +221,23 @@ The system writes a daily allocation row to Google Sheets, giving you a running 
 
 > **Cost:** Completely free. Google Sheets API has a generous free tier (500 requests/100 seconds) that this system will never approach.
 
+> **Security Warning — Scope Your Service Account.** The default service account
+> created above has no IAM role restrictions, which means any workflow that
+> obtains the JSON key can call *any* enabled API in the project. For
+> production deployments:
+>
+> 1. Go to **IAM & Admin → IAM** in the GCP Console.
+> 2. Find your service account (`sector-rotation-writer@...`).
+> 3. Click **Edit** (pencil icon) and assign *only* the roles it needs:
+>    - `roles/sheets.editor` (Google Sheets read/write)
+>    - `roles/drive.file` (access only files it created or was shared on)
+> 4. Remove the default **Editor** or **Owner** role if present.
+> 5. Under **APIs & Services → Credentials**, restrict the key's allowed
+>    APIs to *Google Sheets API* and *Google Drive API* only.
+>
+> This follows the principle of least privilege and prevents credential
+> leakage from escalating into broader GCP access.
+
 ---
 
 ## 6. Configuring Your Holdings
