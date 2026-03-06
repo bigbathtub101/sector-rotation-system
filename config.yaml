@@ -5,65 +5,86 @@
 # No magic numbers in the codebase -- everything references this file.
 # ============================================================================
 # PROFILE: Aggressive Growth -- 27yo, beat-the-market objective
-# UPDATED: 2026-02-28
+# UPDATED: 2026-03-06
 # ============================================================================
 
 # --------------------------------------------------------------------------
 # PORTFOLIO CONTEXT
 # --------------------------------------------------------------------------
 portfolio:
-  total_value: 144000
+  total_value: 235970
   accounts:
     taxable:
-      value: 100000
+      value: 98913
       type: "Individual Brokerage"
       tax_treatment: "Capital gains taxed; long-term preferred"
     roth_ira:
-      value: 44000
+      value: 46207
       type: "Retirement"
       tax_treatment: "All growth permanently tax-free"
+    # 401K and HSA excluded -- passive long-term holds, not managed by rotation system
+    # 401K (Standard Chartered): ~$90,850 -- VIVIX / VTSNX / DFISX
+    # HSA: being restructured to VSMPX/VSCPX/VEMIX/VTMNX/PMAQX
 
 # --------------------------------------------------------------------------
 # TAX-LOCATION RULES
 # --------------------------------------------------------------------------
 tax_location:
   roth_ira_first:
-    - "individual_stocks_thematic"      # Biotech, AI, Defense, Materials individual names
+    - "individual_stocks_thematic"      # HUBS, XYZ, BMRN, FIS, NVDA -- high-growth individual stocks
     - "high_turnover"                   # Momentum-driven, expected hold < 12 months
     - "biotech_smallcap"                # Highest volatility and rebalancing frequency
     - "momentum_tilt_only"              # Flagged as momentum, not fundamental overweight
-    - "thematic_etf"                    # Thematic ETFs (ARKK, BOTZ, etc.) -- high turnover
+    - "thematic_etf"                    # Thematic ETFs -- high turnover
     - "high_dividend_sector"            # XLU, XLP -- high dividend yield generates taxable income
   taxable:
     - "broad_etf_longterm"              # Broad ETFs held > 12 months
-    - "geographic_etf"                  # EEM, INDA, EWZ, VGK -- foreign tax credit eligible
+    - "geographic_etf"                  # IDEQ, INDA, EWZ, VGK -- foreign tax credit eligible
     - "cash_short_duration"             # BIL, short-duration fixed income
     - "energy_materials_etf"            # Lower turnover, structural diversifier
-    - "industry_etf"                    # Sub-sector industry ETFs -- moderate turnover
+    - "industry_etf"                    # Fidelity MSCI sector ETFs -- moderate turnover
     - "tax_loss_harvest_candidate"      # Positions with TLH opportunity
-    - "growth_sector"                   # XLI, XLK, XLC, XLY -- cap appreciation, low dividend yield
+    - "growth_sector"                   # FCOM, FIDU, FHLC, FDIS -- cap appreciation, low dividend yield
   split_threshold: 10000               # Never split a position across accounts unless > $10k
 
   # Dividend-yield tax location routing:
-  # High-dividend US sector ETFs -> Roth (dividends taxed as ordinary income in taxable)
-  # Growth/appreciation US sector ETFs -> Taxable (long-term cap gains taxed favorably)
   high_dividend_sectors:               # TTM yield > ~2.5% -> Roth
     - XLU                              # Utilities ~2.8% yield
     - XLP                              # Consumer Staples ~2.6% yield
     - XLRE                             # Real Estate ~3.2% yield
   growth_sectors:                      # TTM yield < ~1.5% -> Taxable
-    - XLI                              # Industrials ~1.4% yield
-    - XLK                              # Technology ~0.6% yield
-    - XLC                              # Communication ~0.8% yield
-    - XLY                              # Consumer Disc ~0.9% yield
-    - XLF                              # Financials ~1.3% yield
+    - FIDU                             # Fidelity MSCI Industrials ~1.4% yield
+    - FTEC                             # Fidelity MSCI Tech ~0.6% yield
+    - FCOM                             # Fidelity MSCI Communication ~0.8% yield
+    - FDIS                             # Fidelity MSCI Consumer Disc ~0.9% yield
+    - FNCL                             # Fidelity MSCI Financials ~1.3% yield
 
 # --------------------------------------------------------------------------
 # TICKER UNIVERSES
 # --------------------------------------------------------------------------
 tickers:
-  # === CORE SECTOR ETFs (11 GICS sectors) ===
+  # === CURRENT TAXABLE HOLDINGS (Fidelity MSCI series -- 0.084% expense ratio) ===
+  # These are the active sector rotation ETFs in the taxable brokerage (...4156)
   sector_etfs:
+    - FCOM  # Fidelity MSCI Communication Services -- 178 shares, $12,967
+    - FDIS  # Fidelity MSCI Consumer Discretionary -- 72 shares, $7,155
+    - FHLC  # Fidelity MSCI Healthcare -- 241 shares, $17,665
+    - FIDU  # Fidelity MSCI Industrials -- 245 shares, $22,513
+    - IDEQ  # Lazard International Dynamic Equity -- 1,183 shares, $38,554 (conviction intl hold)
+    # Note: VTI fractional (0.174 shares, $58) -- negligible, consider liquidating
+
+  # === ROTH IRA INDIVIDUAL STOCK HOLDINGS ===
+  # Managed separately from sector rotation -- use stock-analyzer repo for these
+  roth_individual_stocks:
+    - HUBS  # HubSpot -- 44 shares, $12,902 -- AI CRM, 30% weight
+    - XYZ   # Block Inc -- 162 shares, $10,867 -- Fintech, 25% weight
+    - BMRN  # BioMarin Pharma -- 167 shares, $10,108 -- Rare disease, 23% weight
+    - FIS   # Fidelity National Information Services -- 193 shares, $9,783 -- Fintech infra, 22% weight
+    - NVDA  # Nvidia -- 14 shares, $2,547 -- AI infrastructure (undersized, adding on bonus)
+
+  # === SPDR XL SECTOR ETFs (screener universe -- not current holdings) ===
+  # Used for factor scoring and regime detection signals only
+  spdr_sector_etfs:
     - XLK   # Technology
     - XLV   # Healthcare
     - XLE   # Energy
@@ -78,33 +99,26 @@ tickers:
 
   # === INDUSTRY / SUB-SECTOR ETFs (granular bets within sectors) ===
   industry_etfs:
-    # Technology sub-sectors
     - SOXX  # Semiconductors (iShares)
     - IGV   # Software (iShares Expanded Tech-Software)
     - HACK  # Cybersecurity (ETFMG Prime Cyber Security)
     - SKYY  # Cloud Computing (First Trust)
-    # Healthcare sub-sectors
     - XBI   # Biotech (SPDR S&P Biotech -- equal-weight)
     - IHI   # Medical Devices (iShares)
     - XPH   # Pharmaceuticals (SPDR S&P)
-    # Financials sub-sectors
     - KBE   # Banks (SPDR S&P Bank)
     - KRE   # Regional Banks (SPDR S&P)
     - IAI   # Broker-Dealers & Securities Exchanges (iShares)
-    # Consumer sub-sectors
     - XHB   # Homebuilders (SPDR S&P)
     - XRT   # Retail (SPDR S&P -- equal-weight)
     - IBUY  # Online Retail (Amplify)
-    # Industrials sub-sectors
     - ITA   # Aerospace & Defense (iShares)
     - IYT   # Transportation (iShares)
-    # Energy sub-sectors
     - XOP   # Oil & Gas Exploration (SPDR S&P)
     - OIH   # Oil Services (VanEck)
-    # Real Estate sub-sectors
-    - VNQ   # Vanguard Real Estate (broader than XLRE)
+    - VNQ   # Vanguard Real Estate
 
-  # === THEMATIC ETFs (cross-sector megatrend exposure) ===
+  # === THEMATIC ETFs ===
   thematic_etfs:
     - BOTZ  # Robotics & AI (Global X)
     - LIT   # Lithium & Battery Tech (Global X)
@@ -114,7 +128,7 @@ tickers:
     - ARKK  # Disruptive Innovation (ARK)
     - ARKG  # Genomic Revolution (ARK)
     - ARKW  # Next Generation Internet (ARK)
-    - SMH   # Semiconductors (VanEck -- more concentrated than SOXX)
+    - SMH   # Semiconductors (VanEck)
     - KOMP  # New Economies Composite (SPDR Kensho)
     - UFO   # Space (Procure)
     - DRIV  # Autonomous & EV Technology (Global X)
@@ -125,13 +139,13 @@ tickers:
     - AIQ   # AI & Technology (Global X)
 
   # === GEOGRAPHIC ETFs ===
-  # Revised: dropped EEM (redundant with VWO, 0.72% fee), replaced FXI
-  # (concentrated state-owned Chinese large-caps, 0.73% fee) with MCHI
-  # (broader China, 0.19% fee, includes tech/consumer)
+  # IDEQ is current primary international holding (taxable, conviction position)
+  # Others below are rotation candidates and screener universe
   geographic_etfs:
-    - INDA  # India
-    - EWZ   # Brazil
-    - VGK   # Europe
+    - IDEQ  # Lazard Intl Dynamic Equity -- PRIMARY INTL HOLDING (taxable)
+    - INDA  # India -- 2.9% target weight
+    - EWZ   # Brazil -- 2.9% target weight
+    - VGK   # Europe -- 15% target weight
     - MCHI  # iShares MSCI China (replaced FXI -- broader, cheaper)
     - EWY   # South Korea
     - EWT   # Taiwan
@@ -166,9 +180,9 @@ tickers:
 
   # ===========================================================================
   # THEMATIC WATCHLISTS (individual stocks -- 3-5% position sizing in Roth)
+  # Note: HUBS, XYZ, BMRN, FIS, NVDA are CURRENT Roth holdings above.
+  # Watchlists below are the screening universe for future rotation candidates.
   # ===========================================================================
-  # ITCI removed (acquired by J&J Apr 2025, delisted)
-  # PANW removed (market cap ~$120B, exceeds $40B mid-cap threshold)
 
   watchlist_biotech:
     - NBIX   # Neurocrine Biosciences -- CNS pipeline
@@ -180,7 +194,7 @@ tickers:
     - TERN   # Terns Pharmaceuticals -- oncology (CML)
     - IONS   # Ionis Pharmaceuticals -- RNA-targeted therapies
     - MRNA   # Moderna -- mRNA platform (pipeline beyond COVID)
-    - BMRN   # BioMarin -- rare disease
+    - BMRN   # BioMarin -- rare disease (CURRENT ROTH HOLDING)
     - PCVX   # Vaxcyte -- vaccines
     - ALNY   # Alnylam Pharmaceuticals -- RNAi therapeutics
 
@@ -192,7 +206,7 @@ tickers:
     - ZS     # Zscaler -- zero-trust security
     - CYBR   # CyberArk -- identity security
     - MDB    # MongoDB -- AI-native database
-    - HUBS   # HubSpot -- AI-powered CRM
+    - HUBS   # HubSpot -- AI-powered CRM (CURRENT ROTH HOLDING)
     - OKTA   # Okta -- identity management
     - DOCN   # DigitalOcean -- cloud infra mid-tier
     - S      # SentinelOne -- AI-powered endpoint
@@ -236,6 +250,7 @@ tickers:
     - CRUS   # Cirrus Logic -- mixed-signal
     - RMBS   # Rambus -- memory interface
     - WOLF   # Wolfspeed -- SiC power
+    - NVDA   # Nvidia -- AI infrastructure (CURRENT ROTH HOLDING -- adding on bonus)
 
   watchlist_energy_transition:
     - ENPH   # Enphase Energy -- micro-inverters
@@ -250,7 +265,8 @@ tickers:
     - NNE    # Nano Nuclear Energy -- micro-reactors
 
   watchlist_fintech:
-    - XYZ    # Block (fka Square) -- payments/crypto
+    - XYZ    # Block (fka Square) -- payments/crypto (CURRENT ROTH HOLDING)
+    - FIS    # Fidelity National Information Services (CURRENT ROTH HOLDING)
     - AFRM   # Affirm -- BNPL
     - SOFI   # SoFi Technologies -- digital banking
     - UPST   # Upstart -- AI lending
@@ -269,33 +285,39 @@ tickers:
 
   # Market cap thresholds for watchlist validation
   watchlist_market_cap:
-    biotech_min_m: 500       # $500M minimum
-    biotech_max_m: 8000      # $8B maximum for pure M&A plays
-    ai_software_min_m: 3000  # $3B minimum
-    ai_software_max_m: 40000 # $40B maximum (mid-cap focus)
-    defense_min_m: 1000      # $1B minimum
-    materials_min_m: 500     # $500M minimum
-    semiconductors_min_m: 2000  # $2B minimum
+    biotech_min_m: 500
+    biotech_max_m: 8000
+    ai_software_min_m: 3000
+    ai_software_max_m: 40000
+    defense_min_m: 1000
+    materials_min_m: 500
+    semiconductors_min_m: 2000
     energy_transition_min_m: 500
     fintech_min_m: 1000
 
 # --------------------------------------------------------------------------
 # ETF STRUCTURAL QUALITY (Phase 11 Enhancement)
 # --------------------------------------------------------------------------
-# Controls expense ratio penalties, overlap detection, and ETF quality gates.
-# The optimizer penalizes ETFs with high expense ratios and detects overlap
-# groups to prevent double-counting exposure.
 etf_quality:
-  # Maximum acceptable expense ratio (bps). ETFs above this are flagged.
-  max_expense_ratio_bps: 50      # 0.50% -- anything above gets penalized
-
-  # Expense ratio penalty: weight is multiplied by (1 - penalty_factor * expense_ratio)
-  # At 0.73% expense ratio with factor=2.0: penalty = 1 - 2.0*0.0073 = 0.985 (1.5% haircut)
+  max_expense_ratio_bps: 50
   expense_penalty_factor: 2.0
 
-  # Known expense ratios (bps). Used when live data unavailable.
-  # Source: fund prospectuses as of 2026-02
   expense_ratios_bps:
+    # Fidelity MSCI series (CURRENT TAXABLE HOLDINGS -- 0.084%)
+    FCOM: 8
+    FDIS: 8
+    FHLC: 8
+    FIDU: 8
+    FTEC: 8
+    FNCL: 8
+    FIDU: 8
+    FSTA: 8
+    FENY: 8
+    FMAT: 8
+    FUTY: 8
+    FREL: 8
+    # Lazard IDEQ (CURRENT TAXABLE HOLDING -- 0.40%)
+    IDEQ: 40
     # US Sector ETFs -- SPDR series (0.09%)
     XLK: 9
     XLF: 9
@@ -308,18 +330,6 @@ etf_quality:
     XLV: 9
     XLRE: 9
     XLB: 9
-    # US Sector ETFs -- Fidelity MSCI series (0.084%)
-    FTEC: 8
-    FHLC: 8
-    FNCL: 8
-    FIDU: 8
-    FDIS: 8
-    FSTA: 8
-    FENY: 8
-    FMAT: 8
-    FUTY: 8
-    FREL: 8
-    FCOM: 8
     # US Sector ETFs -- Vanguard series (0.09-0.10%)
     VGT: 9
     VHT: 10
@@ -332,91 +342,96 @@ etf_quality:
     VPU: 10
     VOX: 10
     # Geographic ETFs -- Franklin FTSE series (0.09-0.19%)
-    FLIN: 19     # Franklin India -- 0.19%
-    FLBR: 19     # Franklin Brazil -- 0.19%
-    FLJP: 9      # Franklin Japan -- 0.09%
-    FLEU: 9      # Franklin Europe -- 0.09%
-    FLCH: 19     # Franklin China -- 0.19%
-    FLKR: 9      # Franklin S. Korea -- 0.09%
-    FLTW: 19     # Franklin Taiwan -- 0.19%
+    FLIN: 19
+    FLBR: 19
+    FLJP: 9
+    FLEU: 9
+    FLCH: 19
+    FLKR: 9
+    FLTW: 19
     # Geographic ETFs -- iShares/Vanguard legacy
-    VGK: 7       # Vanguard Europe -- 0.07%
-    EWJ: 50      # iShares Japan -- 0.50%
-    EWY: 57      # iShares S. Korea -- 0.57%
-    EWT: 57      # iShares Taiwan -- 0.57%
-    EWZ: 58      # iShares Brazil -- 0.58%
-    MCHI: 59     # iShares MSCI China -- 0.59%
-    VWO: 8       # Vanguard Emerging Markets -- 0.08%
-    INDA: 65     # iShares India -- 0.65%
-    KWEB: 69     # KraneShares China Internet -- 0.69%
-    EEM: 72      # iShares EM (REMOVED -- listed for reference) -- 0.72%
-    FXI: 73      # iShares China LC (REMOVED -- listed for reference) -- 0.73%
-    INDY: 89     # iShares India 50 -- 0.89%
-    FEZ: 29      # SPDR Euro Stoxx 50 -- 0.29%
-    DXJ: 48      # WisdomTree Japan Hedged -- 0.48%
-    # Broad EM alternatives
-    IEMG: 9      # iShares Core EM -- 0.09% (alternative to VWO)
+    VGK: 7
+    EWJ: 50
+    EWY: 57
+    EWT: 57
+    EWZ: 58
+    MCHI: 59
+    VWO: 8
+    INDA: 65
+    KWEB: 69
+    EEM: 72      # REMOVED -- listed for reference only
+    FXI: 73      # REMOVED -- listed for reference only
+    INDY: 89
+    FEZ: 29
+    DXJ: 48
+    IEMG: 9
     # Cash / Short-duration
-    SGOV: 3      # iShares 0-3 Month Treasury -- 0.03%
-    BIL: 14      # SPDR 1-3 Month T-Bill -- 0.14%
-    SHV: 15      # iShares Short Treasury -- 0.15%
+    SGOV: 3
+    BIL: 14
+    SHV: 15
     # Thematic ETFs
-    AIQ: 68      # Global X AI -- 0.68%
-    HACK: 60     # ETFMG Cybersecurity -- 0.60%
+    AIQ: 68
+    HACK: 60
 
-  # Overlap groups: ETFs that substantially overlap in holdings.
-  # Within each group, the optimizer will prefer the cheapest member
-  # and penalize redundant positions.
   overlap_groups:
     broad_em:
       members: [VWO, EEM, IEMG]
-      preferred: VWO                # Cheapest broad EM fund
-      overlap_pct: 85               # ~85% holdings overlap
+      preferred: VWO
+      overlap_pct: 85
     china:
       members: [MCHI, FXI, KWEB]
-      preferred: MCHI               # Broadest, cheapest
-      overlap_pct: 40               # Partial overlap (KWEB is internet-only)
+      preferred: MCHI
+      overlap_pct: 40
     taiwan_in_em:
       members: [EWT, VWO]
       note: "EWT is ~18% of VWO. Standalone EWT is an intentional overweight."
       overlap_pct: 18
-      max_combined_weight_pct: 8    # Cap combined Taiwan exposure
+      max_combined_weight_pct: 8
     korea_in_em:
       members: [EWY, VWO]
       note: "EWY is NOT in VWO (FTSE excludes S. Korea). EWY adds unique exposure."
-      overlap_pct: 0                # No overlap -- VWO uses FTSE index
+      overlap_pct: 0
+    fidelity_spdr_overlap:
+      members: [FCOM, XLC]
+      note: "FCOM (Fidelity) and XLC (SPDR) track same sector. FCOM preferred -- lower fee."
+      preferred: FCOM
+      overlap_pct: 95
+    fidelity_spdr_industrials:
+      members: [FIDU, XLI]
+      preferred: FIDU
+      overlap_pct: 90
+    fidelity_spdr_healthcare:
+      members: [FHLC, XLV]
+      preferred: FHLC
+      overlap_pct: 90
+    fidelity_spdr_discretionary:
+      members: [FDIS, XLY]
+      preferred: FDIS
+      overlap_pct: 90
 
-  # ETF concentration limits: max single-country weight (prevents
-  # one geographic bet from dominating the intl sleeve)
-  max_single_country_pct: 8.0     # No single country ETF > 8% of portfolio
-  max_single_region_pct: 15.0     # No single multi-country ETF (VGK, VWO) > 15%
-  max_em_total_pct: 20.0          # Total EM exposure cap
-  max_intl_total_pct: 35.0        # Total international cap (developed + EM)
+  # International concentration limits
+  # Note: current intl exposure is ~39% of total portfolio (IDEQ + 401K VTSNX/DFISX)
+  # Rotation system manages taxable + Roth only (~$145,120)
+  max_single_country_pct: 8.0
+  max_single_region_pct: 15.0
+  max_em_total_pct: 20.0
+  max_intl_total_pct: 35.0         # Applied to taxable+Roth sleeve only
 
-  # Per-ticker weight caps (defense-heavy sectors that CVaR over-allocates)
   per_ticker_cap_pct:
-    XLU: 6.0                      # Utilities: defensive, high-div, cap at 6% for 27yo offense
+    XLU: 6.0                       # Utilities: cap at 6% for 27yo offense profile
+    IDEQ: 40.0                     # Conviction intl hold -- allow up to 40% of taxable
 
-  # Offense-excluded ETFs: these tickers are zeroed out in offense regime.
-  # XLP (Consumer Staples) is purely defensive, high-dividend, and doesn't
-  # belong in an aggressive 27yo's offense portfolio.
   offense_exclude:
-    - XLP                         # Consumer Staples -- defensive, ~2.6% yield, no growth thesis
+    - XLP                          # Consumer Staples -- defensive, ~2.6% yield, no offense thesis
 
 # --------------------------------------------------------------------------
 # ETF AUTO-SELECTOR (Monthly best-in-class evaluation)
 # --------------------------------------------------------------------------
-# For each exposure slot, the system evaluates candidate ETFs on expense ratio,
-# AUM (liquidity), and holdings breadth, then selects the optimal fund.
-# Run: python etf_selector.py --force
-# Cache: etf_selections.json (refreshed monthly)
 etf_selector:
-  max_cache_age_days: 31           # Re-evaluate monthly
+  max_cache_age_days: 31
 
   exposure_slots:
-    # === US SECTOR ETFs ===
-    # SPDR XL* series (0.09%) vs Fidelity MSCI series (0.084%)
-    # Fidelity tracks MSCI (broader, includes mid-caps) vs S&P 500-only
+    # Fidelity MSCI series is preferred for all US sector slots (lower fee than SPDR)
     us_technology:
       asset_class: us_equities
       candidates: [FTEC, VGT, XLK]
@@ -452,7 +467,7 @@ etf_selector:
     us_utilities:
       asset_class: us_equities
       candidates: [FUTY, VPU, XLU]
-      typical_hold_holdings: 70
+      typical_holdings: 70
     us_real_estate:
       asset_class: us_equities
       candidates: [FREL, VNQ, XLRE]
@@ -461,9 +476,6 @@ etf_selector:
       asset_class: us_equities
       candidates: [FCOM, VOX, XLC]
       typical_holdings: 100
-
-    # === GEOGRAPHIC ETFs ===
-    # Franklin FTSE series (0.09-0.19%) vs iShares EW* series (0.50-0.65%)
     india:
       asset_class: em_equities
       candidates: [FLIN, INDA, INDY]
@@ -496,8 +508,11 @@ etf_selector:
       asset_class: em_equities
       candidates: [VWO, IEMG, EEM]
       typical_holdings: 4000
-
-    # === CASH / SHORT-DURATION ===
+    intl_active:
+      asset_class: intl_developed
+      candidates: [IDEQ]
+      note: "Conviction active intl position -- not subject to auto-selector replacement"
+      typical_holdings: 200
     cash_tbill:
       asset_class: cash_short_duration
       candidates: [SGOV, BIL, SHV]
@@ -514,216 +529,220 @@ fred:
     unemployment_rate: "UNRATE"
     cfnai: "CFNAI"
     industrial_production: "INDPRO"
-  # FRED API key read from environment variable FRED_API_KEY
-  # Register free at https://fred.stlouisfed.org/docs/api/api_key.html
 
 # --------------------------------------------------------------------------
 # SEC EDGAR SETTINGS
 # --------------------------------------------------------------------------
 sec_edgar:
   user_agent: "QuantSystemBuilder/1.0 (your_email@domain.com)"
-  rate_limit_sleep: 0.15        # seconds between API calls (10 req/s limit)
+  rate_limit_sleep: 0.15
   filing_types:
     - "10-K"
     - "8-K"
-  max_filings_per_ticker: 2     # Most recent N filings per ticker (keeps NLP fresh, reduces load)
-  download_retries: 3           # Retry attempts for 503/timeout on document downloads
-  retry_backoff_base: 2         # Exponential backoff base (2s, 4s, 8s)
-  top_holdings_per_etf: 5       # Number of top holdings to pull filings for
-  max_fetch_time_seconds: 300    # Global time budget for SEC fetch (prevents hangs)
+  max_filings_per_ticker: 2
+  download_retries: 3
+  retry_backoff_base: 2
+  top_holdings_per_etf: 5
+  max_fetch_time_seconds: 300
   base_url: "https://data.sec.gov/submissions/"
   archives_url: "https://www.sec.gov/Archives/edgar/data/"
 
 # --------------------------------------------------------------------------
-# REGIME DETECTION PARAMETERS (Section 2, 8.2)
+# REGIME DETECTION PARAMETERS
 # --------------------------------------------------------------------------
 regime:
   wedge_volume:
-    rolling_window: 63              # Trading days for demeaned log-return vectors
-    percentile_lookback: 252        # Trading days for percentile normalization
+    rolling_window: 63
+    percentile_lookback: 252
   thresholds:
-    panic_upper: 5                  # Percentile: below this = Panic zone
-    defense_upper: 30               # Percentile: below this = Defense zone
-    panic_probability_anchor: 8     # Probability scoring anchor for Panic
-    offense_probability_anchor: 25  # Probability scoring anchor for Offense
+    panic_upper: 5
+    defense_upper: 30
+    panic_probability_anchor: 8
+    offense_probability_anchor: 25
   confirmation:
-    consecutive_days: 2             # Days required to confirm regime transition
-    whipsaw_buffer: 3               # Percentile floor for Panic confirmation (Section 8.2)
+    consecutive_days: 2
+    whipsaw_buffer: 3
   fast_shock:
-    vix_rv_ratio_threshold: 1.5    # VIX / 21-day realized vol ratio for Fast Shock
-    rv_window: 21                   # Days for realized volatility calculation
+    vix_rv_ratio_threshold: 1.5
+    rv_window: 21
 
 # --------------------------------------------------------------------------
-# FACTOR MODEL PARAMETERS (Section 3)
+# FACTOR MODEL PARAMETERS
 # --------------------------------------------------------------------------
 factor_model:
-  rolling_window_months: 36         # Rolling OLS regression window
-  mclean_pontiff_decay: 0.74       # Post-publication decay multiplier
+  rolling_window_months: 36
+  mclean_pontiff_decay: 0.74
   momentum:
     lookback_months: 12
-    skip_months: 1                  # 12-1 month momentum (skip most recent month)
+    skip_months: 1
   valuation:
-    discount_rate: 0.08             # 8% discount rate for implied growth calculation
-    momentum_only_percentile: 75    # Above this = "momentum tilt only"
-    avoid_percentile: 90            # Above this = AVOID label
-    momentum_cap_fraction: 0.75     # Was 0.50 -- reduce penalty for momentum-only (growth bias)
+    discount_rate: 0.08
+    momentum_only_percentile: 75
+    avoid_percentile: 90
+    momentum_cap_fraction: 0.75
 
 # --------------------------------------------------------------------------
-# CVaR OPTIMIZATION PARAMETERS (Section 5, 8.1)
+# CVaR OPTIMIZATION PARAMETERS
 # --------------------------------------------------------------------------
 # AGGRESSIVE PROFILE: 95-100% equity in Offense, 15-30% cash in Defense
+# Manages taxable ($98,913) + Roth IRA ($46,207) = $145,120 active sleeve
 # --------------------------------------------------------------------------
 optimizer:
-  cvar_confidence: 0.95             # 95% CVaR
-  tail_correlation_percentile: 10   # Longin-Solnik: joint returns below 10th percentile
-  max_positions: 15                        # Maximum portfolio positions (FIX: was uncapped -> 53 positions)
-  max_screener_picks: 5                    # Maximum individual stocks injected from screener (FIX B)
-  min_position_pct: 3.0                    # Drop and redistribute positions below this % (critique fix)
-  em_weight_reduction_range: [0.20, 0.35]  # Expected EM reduction vs. naive CVaR
+  cvar_confidence: 0.95
+  tail_correlation_percentile: 10
+  max_positions: 15
+  max_screener_picks: 5
+  min_position_pct: 3.0
+  em_weight_reduction_range: [0.20, 0.35]
 
-  # Regime-conditional allocation bands -- AGGRESSIVE GROWTH
-  # The sum of all asset class upper bounds should allow >=95% equity in Offense.
   allocation_bands:
     us_equities:
-      panic: [0.05, 0.15]          # Was [0.00, 0.05] -- keep skin in the game
-      defense: [0.20, 0.40]        # Was [0.10, 0.25] -- stay more invested
-      offense: [0.55, 0.75]        # Was [0.40, 0.60] -- aggressive core
+      panic: [0.05, 0.15]
+      defense: [0.20, 0.40]
+      offense: [0.55, 0.75]
     intl_developed:
-      panic: [0.00, 0.05]          # Was [0.00, 0.00] -- small intl hedge
-      defense: [0.05, 0.15]        # Unchanged
-      offense: [0.20, 0.30]        # Was [0.15, 0.25] -- lean into cheap intl valuations
+      panic: [0.00, 0.05]
+      defense: [0.05, 0.15]
+      offense: [0.20, 0.30]
     em_equities:
-      panic: [0.00, 0.02]          # Was [0.00, 0.00] -- tiny EM position OK
-      defense: [0.02, 0.10]        # Was [0.00, 0.08]
-      offense: [0.10, 0.20]        # Was [0.08, 0.15] -- more EM upside
+      panic: [0.00, 0.02]
+      defense: [0.02, 0.10]
+      offense: [0.10, 0.20]
     energy_materials:
-      panic: [0.00, 0.05]          # Unchanged
-      defense: [0.05, 0.15]        # Unchanged
-      offense: [0.10, 0.20]        # Unchanged
+      panic: [0.00, 0.05]
+      defense: [0.05, 0.15]
+      offense: [0.10, 0.20]
     healthcare:
-      panic: [0.05, 0.15]          # Was [0.05, 0.10] -- healthcare as defense
-      defense: [0.10, 0.20]        # Unchanged
-      offense: [0.05, 0.12]        # Was [0.10, 0.18] -- cap CVaR's defensive healthcare bias
+      panic: [0.05, 0.15]
+      defense: [0.10, 0.20]
+      offense: [0.05, 0.12]
     industry_sub:
-      panic: [0.00, 0.00]          # NEW -- industry ETFs sit out in Panic
-      defense: [0.00, 0.05]        # NEW -- minimal in Defense
-      offense: [0.05, 0.15]        # NEW -- tilt to sub-sectors in Offense
+      panic: [0.00, 0.00]
+      defense: [0.00, 0.05]
+      offense: [0.05, 0.15]
     thematic:
-      panic: [0.00, 0.00]          # NEW -- thematics fully off in Panic
-      defense: [0.00, 0.05]        # NEW -- tiny thematic in Defense
-      offense: [0.05, 0.15]        # NEW -- meaningful thematic in Offense
+      panic: [0.00, 0.00]
+      defense: [0.00, 0.05]
+      offense: [0.05, 0.15]
     cash_short_duration:
-      panic: [0.50, 0.80]          # Was [0.70, 1.00] -- less cash even in Panic
-      defense: [0.15, 0.30]        # Was [0.30, 0.60] -- cut cash in Defense
-      offense: [0.00, 0.03]        # Was [0.00, 0.05] -- near-zero cash for 27yo offense
+      panic: [0.50, 0.80]
+      defense: [0.15, 0.30]
+      offense: [0.00, 0.03]
     vix_overlay_notional:
-      panic: [0.00, 0.02]          # Unchanged
-      defense: [0.02, 0.04]        # Unchanged
-      offense: [0.005, 0.015]      # Unchanged
+      panic: [0.00, 0.02]
+      defense: [0.02, 0.04]
+      offense: [0.005, 0.015]
 
 # --------------------------------------------------------------------------
-# VIX OVERLAY PARAMETERS (Section 8.3)
+# VIX OVERLAY PARAMETERS
 # --------------------------------------------------------------------------
 vix_overlay:
-  max_annual_roll_drag_pct: 0.40    # 40% of Calmar improvement
+  max_annual_roll_drag_pct: 0.40
   put_spread_premium_budget:
     defense: [0.02, 0.04]
     panic: [0.00, 0.02]
     offense: [0.005, 0.015]
 
 # --------------------------------------------------------------------------
-# NLP SENTIMENT PARAMETERS (Section 4, 6.2a)
+# NLP SENTIMENT PARAMETERS
 # --------------------------------------------------------------------------
 nlp:
   model: "ProsusAI/finbert"
-  max_tokens: 512                   # Strict token limit per filing
-  rolling_sentiment_window: 90      # Days for sentiment trend
-  vix_drift_percentile: 75          # VIX above this = "NLP Regime Drift Risk"
+  max_tokens: 512
+  rolling_sentiment_window: 90
+  vix_drift_percentile: 75
   regime_weights:
-    offense: 0.20                   # NLP contributes 20% of composite in Offense
-    defense: 0.00                   # Monitoring only
-    panic: 0.00                     # Monitoring only
+    offense: 0.20
+    defense: 0.00
+    panic: 0.00
 
 # --------------------------------------------------------------------------
-# MONITORING & ALERTS (Section 7.2, 9.2)
+# MONITORING & ALERTS
 # --------------------------------------------------------------------------
 monitor:
-  rebalance_threshold_bps: 200      # Basis points drift to trigger rebalance
-  entry_window_threshold_bps: 300   # Underweight threshold for entry signal
-  extended_defense_days: 60         # Days in Defense/Panic before reassessment (Section 9.2)
+  rebalance_threshold_bps: 300      # Raised from 200 -- individual stocks (HUBS, XYZ) move fast
+  entry_window_threshold_bps: 300
+  extended_defense_days: 60
   panic_exit_sequence:
-    immediate_pct: 0.50             # 50% immediate on Panic
-    remainder_days: [3, 5]          # Remainder over 3-5 days
-  run_time_et: "16:30"              # 4:30 PM ET daily
+    immediate_pct: 0.50
+    remainder_days: [3, 5]
+  run_time_et: "16:30"
 
 # --------------------------------------------------------------------------
 # DATA QUALITY THRESHOLDS
 # --------------------------------------------------------------------------
 data_quality:
-  stale_sector_etf_limit: 3         # Max stale sector ETFs before suppressing signals
-  backfill_method: "last_valid"     # Use most recent valid close
+  stale_sector_etf_limit: 3
+  backfill_method: "last_valid"
 
 # --------------------------------------------------------------------------
 # ALERT DELIVERY
 # --------------------------------------------------------------------------
 alerts:
   telegram:
-    # Bot token from env: TELEGRAM_BOT_TOKEN
-    # Chat ID from env: TELEGRAM_CHAT_ID
     enabled: true
   email:
-    # Gmail credentials from env: GMAIL_USERNAME, GMAIL_PASSWORD
     enabled: true
   google_sheets:
-    # Service account JSON from env: GOOGLE_SHEETS_CREDENTIALS
     spreadsheet_name: "Sector Rotation Daily Log"
     enabled: true
 
 # --------------------------------------------------------------------------
-# BACKTEST PARAMETERS (Section 9)
+# BACKTEST PARAMETERS
 # --------------------------------------------------------------------------
 backtest:
   mclean_pontiff_label: "(in-sample, apply 26% McLean-Pontiff decay to alpha differential for forward estimate)"
   stress_tests:
     policy_shock:
-      sp500_drop_threshold: -0.03   # >3% single-day drop
-      wedge_volume_pre_threshold: 15  # No prior deterioration below 15th percentile
+      sp500_drop_threshold: -0.03
+      wedge_volume_pre_threshold: 15
     incomplete_panic:
       analog_year: 2022
     extended_bull:
       duration_years: 10
-      annual_drag_range: [0.005, 0.012]  # 0.5% to 1.2% annual drag
+      annual_drag_range: [0.005, 0.012]
 
 # --------------------------------------------------------------------------
-# SECTION 8.2 -- PROBABILISTIC TRIGGER PARAMETERS
+# PROBABILISTIC TRIGGER PARAMETERS
 # --------------------------------------------------------------------------
 probabilistic_triggers:
-  regime_persistence_days: 2        # Default confirmation requirement
-  whipsaw_buffer_percentile: 3      # Panic confirmation floor
-  upgrade_path_trigger: 15          # Percentile trigger for regime upgrade path
+  regime_persistence_days: 2
+  whipsaw_buffer_percentile: 3
+  upgrade_path_trigger: 15
 
 # --------------------------------------------------------------------------
-# STOCK SCREENER PARAMETERS (Phase 3B)
+# STOCK SCREENER PARAMETERS
 # --------------------------------------------------------------------------
 stock_screener:
-  top_holdings_count: 20            # Pull top N holdings from each overweight ETF
-  min_price_history_days: 252       # Minimum trading days needed for scoring
-  watchlist_pos_pct: 0.04           # Each watchlist position = 4% of assigned account (was 2%)
-  roth_satellite_pct: 0.20          # 20% of Roth IRA reserved for individual stock picks
-  satellite_stock_count: 5          # Top 5 screener picks become satellite positions
+  top_holdings_count: 20
+  min_price_history_days: 252
+  watchlist_pos_pct: 0.04
+  roth_satellite_pct: 0.20          # 20% of Roth IRA ($46,207) = ~$9,241 for screener picks
+  satellite_stock_count: 5          # Top 5 picks: currently HUBS, XYZ, BMRN, FIS, NVDA
   scoring_weights:
-    momentum: 0.30                  # 12-1 month momentum rank
-    quality: 0.25                   # ROE + gross margin + OCF yield
-    value: 0.25                     # Forward P/E vs 5yr median
-    size: 0.20                      # Market cap rank (small/mid-cap bonus)
+    momentum: 0.30
+    quality: 0.25
+    value: 0.25
+    size: 0.20
   valuation_filter:
-    discount_rate: 0.08             # 8% discount rate for implied growth
-    momentum_only_percentile: 75    # Implied growth > 75th = MOMENTUM_ONLY
-    avoid_percentile: 90            # Implied growth > 90th = AVOID
+    discount_rate: 0.08
+    momentum_only_percentile: 75
+    avoid_percentile: 90
   entry_signal:
-    min_factor_score_percentile: 75 # Top quartile factor score required
-    require_fundamental_buy: true   # Must pass valuation filter
-    require_offense_regime: true    # Parent sector must be in Offense band
+    min_factor_score_percentile: 75
+    require_fundamental_buy: true
+    require_offense_regime: true
   exit_signal:
-    momentum_bottom_percentile: 25  # Momentum drops to bottom quartile
-    trigger_on_defense_rotation: true  # Exit when sector rotates to Defense
+    momentum_bottom_percentile: 25
+    trigger_on_defense_rotation: true
+
+# --------------------------------------------------------------------------
+# PENDING ACTIONS (as of 2026-03-06)
+# --------------------------------------------------------------------------
+# 1. Bonus arrives -> Max Roth IRA ($7,000 2026 limit) -> buy more NVDA in Roth
+# 2. Sell taxable ETF lots (prioritize lowest gain / loss harvest lots) -> fund 529
+# 3. Open 529 plan (Utah my529 or NY) with self as beneficiary -- starts 15yr clock
+# 4. HSA rebalance: VSMPX 50% / VSCPX 20% / VEMIX 15% / VTMNX 10% / PMAQX 5%
+# 5. Trump Account: open at child's birth (post July 4 2026), claim $1,000 seed
+# 6. VTI fractional (0.174 shares, $58) in taxable -- negligible, consider liquidating
+# --------------------------------------------------------------------------
