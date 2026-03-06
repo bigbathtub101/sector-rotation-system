@@ -63,13 +63,34 @@ tax_location:
 # TICKER UNIVERSES
 # --------------------------------------------------------------------------
 tickers:
-  # === CURRENT TAXABLE HOLDINGS (Fidelity MSCI series -- 0.084% expense ratio) ===
-  # These are the active sector rotation ETFs in the taxable brokerage (...4156)
+  # === CORE SECTOR ETFs (11 GICS sectors -- OPTIMIZER UNIVERSE) ===
+  # CRITICAL: Keep SPDR XL tickers here. The CVaR optimizer and regime detector
+  # require the full 11-sector universe for price history and allocation math.
+  # The ETF auto-selector then substitutes cheaper equivalents (Fidelity MSCI)
+  # at execution time. Do NOT replace these with Fidelity tickers.
   sector_etfs:
-    - FCOM  # Fidelity MSCI Communication Services -- 178 shares, $12,967
-    - FDIS  # Fidelity MSCI Consumer Discretionary -- 72 shares, $7,155
-    - FHLC  # Fidelity MSCI Healthcare -- 241 shares, $17,665
-    - FIDU  # Fidelity MSCI Industrials -- 245 shares, $22,513
+    - XLK   # Technology
+    - XLV   # Healthcare
+    - XLE   # Energy
+    - XLF   # Financials
+    - XLI   # Industrials
+    - XLB   # Materials
+    - XLU   # Utilities
+    - XLP   # Consumer Staples
+    - XLRE  # Real Estate
+    - XLC   # Communication Services
+    - XLY   # Consumer Discretionary
+
+  # === ACTUAL TAXABLE HOLDINGS (Fidelity MSCI series -- 0.084% expense ratio) ===
+  # These are what you physically own. The ETF auto-selector maps XLC->FCOM,
+  # XLI->FIDU, XLV->FHLC, XLY->FDIS at execution. IDEQ is a conviction hold
+  # not subject to auto-selector substitution.
+  # holdings_tracker.py uses this list to classify positions correctly.
+  taxable_holdings:
+    - FCOM  # Fidelity MSCI Communication Services -- 178 shares, $12,967 (maps to XLC)
+    - FDIS  # Fidelity MSCI Consumer Discretionary -- 72 shares, $7,155 (maps to XLY)
+    - FHLC  # Fidelity MSCI Healthcare -- 241 shares, $17,665 (maps to XLV)
+    - FIDU  # Fidelity MSCI Industrials -- 245 shares, $22,513 (maps to XLI)
     - IDEQ  # Lazard International Dynamic Equity -- 1,183 shares, $38,554 (conviction intl hold)
     # Note: VTI fractional (0.174 shares, $58) -- negligible, consider liquidating
 
@@ -82,20 +103,6 @@ tickers:
     - FIS   # Fidelity National Information Services -- 193 shares, $9,783 -- Fintech infra, 22% weight
     - NVDA  # Nvidia -- 14 shares, $2,547 -- AI infrastructure (undersized, adding on bonus)
 
-  # === SPDR XL SECTOR ETFs (screener universe -- not current holdings) ===
-  # Used for factor scoring and regime detection signals only
-  spdr_sector_etfs:
-    - XLK   # Technology
-    - XLV   # Healthcare
-    - XLE   # Energy
-    - XLF   # Financials
-    - XLI   # Industrials
-    - XLB   # Materials
-    - XLU   # Utilities
-    - XLP   # Consumer Staples
-    - XLRE  # Real Estate
-    - XLC   # Communication Services
-    - XLY   # Consumer Discretionary
 
   # === INDUSTRY / SUB-SECTOR ETFs (granular bets within sectors) ===
   industry_etfs:
@@ -391,21 +398,24 @@ etf_quality:
       members: [EWY, VWO]
       note: "EWY is NOT in VWO (FTSE excludes S. Korea). EWY adds unique exposure."
       overlap_pct: 0
-    fidelity_spdr_overlap:
+    fidelity_spdr_communication:
       members: [FCOM, XLC]
-      note: "FCOM (Fidelity) and XLC (SPDR) track same sector. FCOM preferred -- lower fee."
+      note: "FCOM (Fidelity MSCI) and XLC (SPDR) track same sector. Optimizer uses XLC for CVaR math; auto-selector substitutes FCOM at execution."
       preferred: FCOM
       overlap_pct: 95
     fidelity_spdr_industrials:
       members: [FIDU, XLI]
+      note: "Auto-selector substitutes FIDU for XLI at execution."
       preferred: FIDU
       overlap_pct: 90
     fidelity_spdr_healthcare:
       members: [FHLC, XLV]
+      note: "Auto-selector substitutes FHLC for XLV at execution."
       preferred: FHLC
       overlap_pct: 90
     fidelity_spdr_discretionary:
       members: [FDIS, XLY]
+      note: "Auto-selector substitutes FDIS for XLY at execution."
       preferred: FDIS
       overlap_pct: 90
 
